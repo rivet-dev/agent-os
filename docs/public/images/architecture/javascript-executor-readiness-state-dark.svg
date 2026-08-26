@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1860" height="1540" viewBox="0 0 1860 1540" role="img" aria-labelledby="title desc">
+  <title id="title">AgentOS coalesced readiness state machine</title>
+  <desc id="desc">Dark-mode state machine demonstrating flags, per-capability revisions, per-VM wake epochs, acknowledgement races, and JavaScript backpressure.</desc>
+  <defs>
+    <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#f6bd60"/></marker>
+    <marker id="arrV" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#b794f4"/></marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#4ade80"/></marker>
+    <style>
+      .bg{fill:#090d14}.panel{fill:#101722;stroke:#334155;stroke-width:2}.state{fill:#2c2516;stroke:#f6bd60;stroke-width:2}.v8{fill:#2a1f3d;stroke:#b794f4;stroke-width:2}.data{fill:#102a37;stroke:#48cae4;stroke-width:2}.back{fill:#142d25;stroke:#4ade80;stroke-width:2}.title{font:700 34px Inter,system-ui,sans-serif;fill:#f8fafc}.subtitle{font:17px Inter,system-ui,sans-serif;fill:#94a3b8}.h1{font:700 23px Inter,system-ui,sans-serif;fill:#f8fafc}.h2{font:700 18px Inter,system-ui,sans-serif;fill:#e2e8f0}.body{font:15px Inter,system-ui,sans-serif;fill:#cbd5e1}.small{font:13px Inter,system-ui,sans-serif;fill:#94a3b8}.mono{font:14px "SFMono-Regular",Consolas,monospace;fill:#dbeafe}.amber{fill:none;stroke:#f6bd60;stroke-width:3;marker-end:url(#arrA)}.violet{fill:none;stroke:#b794f4;stroke-width:3;marker-end:url(#arrV)}.green{fill:none;stroke:#4ade80;stroke-width:3;marker-end:url(#arrG)}.dash{stroke-dasharray:8 7}.center{text-anchor:middle}.step{fill:#2563eb}.stepText{font:700 13px Inter,system-ui,sans-serif;fill:#fff;text-anchor:middle;dominant-baseline:middle}.code{fill:#111827;stroke:#52657f;stroke-width:1.5}.warning{fill:#321f24;stroke:#fb7185;stroke-width:1.5}.good{fill:#142d25;stroke:#4ade80;stroke-width:1.5}
+    </style>
+  </defs>
+  <rect class="bg" width="1860" height="1540"/>
+  <text class="title" x="55" y="58">4 · Coalescing — revisions are counters, not queued messages</text>
+  <text class="subtitle" x="55" y="91">Example for capability 42. One per-handle map entry survives races; one per-VM epoch identifies the currently outstanding doorbell.</text>
+
+  <rect class="panel" x="40" y="125" width="1780" height="920" rx="20"/>
+  <text class="h1" x="70" y="168">Timeline: three readiness publications become at most two wakes</text>
+
+  <!-- timeline states -->
+  <rect class="state" x="75" y="220" width="285" height="235" rx="15"/>
+  <circle class="step" cx="105" cy="250" r="15"/><text class="stepText" x="105" y="250">0</text>
+  <text class="h2" x="130" y="256">Idle</text>
+  <text class="mono" x="100" y="300">queue = []</text>
+  <text class="mono" x="100" y="330">flags = ∅</text>
+  <text class="mono" x="100" y="360">revision = 7</text>
+  <text class="mono" x="100" y="390">wake = Idle</text>
+  <text class="small" x="100" y="425">No task or thread is spinning.</text>
+
+  <rect class="state" x="410" y="220" width="315" height="235" rx="15"/>
+  <circle class="step" cx="440" cy="250" r="15"/><text class="stepText" x="440" y="250">1</text>
+  <text class="h2" x="465" y="256">First Data event</text>
+  <text class="mono" x="435" y="300">queue = [chunk A]</text>
+  <text class="mono" x="435" y="330">flags = READABLE</text>
+  <text class="mono" x="435" y="360">revision = 8</text>
+  <text class="mono" x="435" y="390">wake = Outstanding(11)</text>
+  <text class="small" x="435" y="425">Enqueue ReadyWake(epoch 11).</text>
+
+  <rect class="state" x="775" y="220" width="315" height="235" rx="15"/>
+  <circle class="step" cx="805" cy="250" r="15"/><text class="stepText" x="805" y="250">2</text>
+  <text class="h2" x="830" y="256">More Data before drain</text>
+  <text class="mono" x="800" y="300">queue = [chunk A, chunk B]</text>
+  <text class="mono" x="800" y="330">flags = READABLE</text>
+  <text class="mono" x="800" y="360">revision = 9</text>
+  <text class="mono" x="800" y="390">wake = Outstanding(11)</text>
+  <text class="small" x="800" y="425">No second wake: already outstanding.</text>
+
+  <rect class="v8" x="1140" y="220" width="315" height="235" rx="15"/>
+  <circle class="step" cx="1170" cy="250" r="15"/><text class="stepText" x="1170" y="250">3</text>
+  <text class="h2" x="1195" y="256">V8 takes batch</text>
+  <text class="mono" x="1165" y="300">epoch = 11</text>
+  <text class="mono" x="1165" y="330">cap = 42</text>
+  <text class="mono" x="1165" y="360">flags = READABLE</text>
+  <text class="mono" x="1165" y="390">observedRevision = 9</text>
+  <text class="small" x="1165" y="425">This is a snapshot, not removal.</text>
+
+  <rect class="state" x="1505" y="220" width="270" height="235" rx="15"/>
+  <circle class="step" cx="1535" cy="250" r="15"/><text class="stepText" x="1535" y="250">4</text>
+  <text class="h2" x="1560" y="256">Race: chunk C</text>
+  <text class="mono" x="1530" y="300">queue += chunk C</text>
+  <text class="mono" x="1530" y="330">flags = READABLE</text>
+  <text class="mono" x="1530" y="360">revision = 10</text>
+  <text class="mono" x="1530" y="390">wake = Outstanding(11)</text>
+  <text class="small" x="1530" y="425">Still no extra wake yet.</text>
+
+  <path class="amber" d="M360 337H410"/>
+  <path class="amber" d="M725 337H775"/>
+  <path class="violet" d="M1090 337H1140"/>
+  <path class="amber" d="M1455 337H1505"/>
+
+  <!-- acknowledgement -->
+  <rect class="v8" x="165" y="535" width="420" height="190" rx="15"/>
+  <circle class="step" cx="195" cy="566" r="15"/><text class="stepText" x="195" y="566">5</text>
+  <text class="h2" x="220" y="572">V8 acknowledges what it observed</text>
+  <text class="mono" x="195" y="616">complete_wake(epoch=11, observedRevision=9)</text>
+  <text class="body" x="195" y="654">Current revision is 10, so flags are not cleared.</text>
+  <text class="small" x="195" y="688">An old acknowledgement cannot erase newer work.</text>
+
+  <rect class="state" x="720" y="535" width="420" height="190" rx="15"/>
+  <circle class="step" cx="750" cy="566" r="15"/><text class="stepText" x="750" y="566">6</text>
+  <text class="h2" x="775" y="572">Broker atomically rearms</text>
+  <text class="mono" x="750" y="616">wake: Outstanding(11) → Idle</text>
+  <text class="mono" x="750" y="646">work remains → Outstanding(12)</text>
+  <text class="body" x="750" y="680">Exactly one replacement wake is enqueued.</text>
+
+  <rect class="good" x="1275" y="535" width="420" height="190" rx="15"/>
+  <circle class="step" cx="1305" cy="566" r="15"/><text class="stepText" x="1305" y="566">7</text>
+  <text class="h2" x="1330" y="572">Next drain catches up</text>
+  <text class="mono" x="1305" y="616">batch(epoch=12, revision=10)</text>
+  <text class="mono" x="1305" y="646">ack revision=10 → clear READABLE</text>
+  <text class="body" x="1305" y="680">If no other work exists, wake returns to Idle.</text>
+
+  <path class="violet" d="M585 630H720"/>
+  <path class="amber" d="M1140 630H1275"/>
+
+  <rect class="code" x="100" y="790" width="760" height="200" rx="14"/>
+  <text class="h2" x="130" y="827">What is bounded?</text>
+  <text class="body" x="130" y="864">• ReadyState has at most one entry per admitted capability.</text>
+  <text class="body" x="130" y="897">• The wake mailbox has capacity one and state permits one queued/in-flight epoch.</text>
+  <text class="body" x="130" y="930">• The socket completion queue is bounded by event count and charged bytes.</text>
+  <text class="body" x="130" y="963">• ready_batch copies at most the configured work quantum.</text>
+
+  <rect class="warning" x="955" y="790" width="800" height="200" rx="14"/>
+  <text class="h2" x="985" y="827">What is not a queue?</text>
+  <text class="body" x="985" y="864">• Revision 8 → 9 → 10 is one integer field being updated, not three queued revisions.</text>
+  <text class="body" x="985" y="897">• READABLE is one level bit, not one event per packet or byte chunk.</text>
+  <text class="body" x="985" y="930">• Epoch 11 identifies one wake cycle; it does not enumerate the socket events.</text>
+  <text class="body" x="985" y="963">• The wake never owns payload bytes, so wake coalescing cannot lose data.</text>
+
+  <!-- backpressure lower panel -->
+  <rect class="panel" x="40" y="1090" width="1780" height="400" rx="20"/>
+  <text class="h1" x="70" y="1133">Backpressure state: JavaScript controls whether the Tokio reader is allowed to read again</text>
+  <rect class="v8" x="85" y="1190" width="360" height="205" rx="14"/>
+  <text class="h2" x="115" y="1223">Guest Readable buffer</text>
+  <text class="h2" x="115" y="1246">reaches its high-water mark</text>
+  <text class="mono" x="115" y="1280">Readable.push(bytes) === false</text>
+  <text class="body" x="115" y="1312">applicationReadDemand = false</text>
+  <text class="body" x="115" y="1342">bridge: SetReadInterest(false)</text>
+  <text class="small" x="115" y="1370">This is stream backpressure, not unref().</text>
+
+  <rect class="state" x="555" y="1190" width="360" height="205" rx="14"/>
+  <text class="h2" x="585" y="1225">Broker + socket capability pause</text>
+  <text class="body" x="585" y="1263">clear/suppress READABLE delivery</text>
+  <text class="body" x="585" y="1296">applicationReadInterest = false</text>
+  <text class="body" x="585" y="1329">reader waits on Notify</text>
+  <text class="small" x="585" y="1370">No repeated level-ready spin or wake storm.</text>
+
+  <rect class="data" x="1025" y="1190" width="330" height="205" rx="14"/>
+  <text class="h2" x="1055" y="1225">Where bytes wait</text>
+  <text class="body" x="1055" y="1263">bounded already-read completion state</text>
+  <text class="body" x="1055" y="1296">plus OS receive buffer</text>
+  <text class="body" x="1055" y="1329">plus sender-side TCP flow control</text>
+  <text class="small" x="1055" y="1370">No additional readiness messages accumulate.</text>
+
+  <rect class="back" x="1465" y="1190" width="310" height="205" rx="14"/>
+  <text class="h2" x="1495" y="1225">When JS needs more</text>
+  <text class="mono" x="1495" y="1263">_read()</text>
+  <text class="body" x="1495" y="1296">SetReadInterest(true)</text>
+  <text class="body" x="1495" y="1329">wake reader + republish if known</text>
+  <text class="small" x="1495" y="1370">The bounded cycle begins again.</text>
+
+  <path class="green" d="M445 1290H555"/>
+  <path class="green" d="M915 1290H1025"/>
+  <path class="green" d="M1355 1290H1465"/>
+  <path class="green dash" d="M1620 1395C1620 1465 270 1465 270 1395"/>
+</svg>

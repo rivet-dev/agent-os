@@ -1,6 +1,6 @@
 ---
 title: "Building Binaries"
-description: "Compile WASM command binaries for agentOS from source."
+description: "Compile command-line software to WebAssembly for agentOS VMs, package the resulting binaries, and verify they run in the guest environment."
 ---
 
 WASM command packages ship **compiled `.wasm` binaries** in their `bin/` that run inside the VM as guest commands. The binaries are build artifacts and are not checked into git, so to add or change a command you build it from source in the AgentOS repo.
@@ -61,4 +61,4 @@ Install a published package and pass it to `software`. Registry WASM packages ar
 
 <CodeSnippet file="examples/software/registry-usage.ts" />
 
-Meta-packages bundle a full set, e.g. `@agentos-software/common` (coreutils, sed, grep, gawk, findutils, diffutils, tar, gzip). Run the commands from the client; see [Processes & Shell](/agentos/docs/processes). Browse the full catalog on the [Registry](/registry), and see the package descriptor in [Software Definition](/agentos/docs/custom-software/definition). To ship your package to npm or use a local build, see [Publishing Packages](/agentos/docs/custom-software/publishing).
+Meta-packages bundle a full set, e.g. `@agentos-software/common` (coreutils, sed, grep, gawk, findutils, diffutils, tar, gzip). Run the commands from the client; see [Processes & Shell](/agentos/docs/processes/). Browse the full catalog on the [Registry](/agentos/registry/), and see the package descriptor in [Software Definition](/agentos/docs/custom-software/definition/). To ship your package to npm or use a local build, see [Publishing Packages](/agentos/docs/custom-software/publishing/).

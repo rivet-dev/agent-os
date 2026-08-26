@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1820" viewBox="0 0 1900 1820" role="img" aria-labelledby="title desc">
+  <title id="title">AgentOS socket readiness to V8 sequence</title>
+  <desc id="desc">Dark-mode sequence diagram showing how a Tokio socket task stores data, publishes readiness, wakes the separate V8 executor, and causes JavaScript to drain the data.</desc>
+  <defs>
+    <marker id="arrowCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#48cae4"/></marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#f6bd60"/></marker>
+    <marker id="arrowViolet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#b794f4"/></marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#4ade80"/></marker>
+    <style>
+      .bg{fill:#090d14}.actor{fill:#151f2e;stroke:#42526b;stroke-width:2}.actorTokio{fill:#102a37;stroke:#48cae4;stroke-width:2}.actorState{fill:#2c2516;stroke:#f6bd60;stroke-width:2}.actorV8{fill:#2a1f3d;stroke:#b794f4;stroke-width:2}.title{font:700 34px Inter,system-ui,sans-serif;fill:#f8fafc}.subtitle{font:17px Inter,system-ui,sans-serif;fill:#94a3b8}.h2{font:700 17px Inter,system-ui,sans-serif;fill:#e2e8f0}.body{font:15px Inter,system-ui,sans-serif;fill:#cbd5e1}.small{font:13px Inter,system-ui,sans-serif;fill:#94a3b8}.mono{font:14px "SFMono-Regular",Consolas,monospace;fill:#dbeafe}.life{stroke:#475569;stroke-width:2;stroke-dasharray:7 8}.cyan{stroke:#48cae4;stroke-width:3;fill:none;marker-end:url(#arrowCyan)}.amber{stroke:#f6bd60;stroke-width:3;fill:none;marker-end:url(#arrowAmber)}.violet{stroke:#b794f4;stroke-width:3;fill:none;marker-end:url(#arrowViolet)}.green{stroke:#4ade80;stroke-width:3;fill:none;marker-end:url(#arrowGreen)}.return{stroke-dasharray:8 6}.note{fill:#111827;stroke:#52657f;stroke-width:1.5}.danger{fill:#321f24;stroke:#fb7185;stroke-width:1.5}.step{fill:#2563eb}.stepText{font:700 13px Inter,system-ui,sans-serif;fill:#fff;text-anchor:middle;dominant-baseline:middle}.center{text-anchor:middle}.band{fill:#0d1522;stroke:#23324a;stroke-width:1}
+    </style>
+  </defs>
+  <rect class="bg" width="1900" height="1820"/>
+  <text class="title" x="55" y="58">2 · One TCP read — exact wake-up and call-into-V8 sequence</text>
+  <text class="subtitle" x="55" y="91">The wake is only a doorbell. The actual bytes take a separate path and are fetched by JavaScript after V8 is awake.</text>
+
+  <!-- Actor headers -->
+  <rect class="actor" x="35" y="125" width="210" height="88" rx="13"/>
+  <text class="h2 center" x="140" y="158">OS kernel</text><text class="small center" x="140" y="184">TCP + epoll</text>
+  <rect class="actorTokio" x="285" y="125" width="260" height="88" rx="13"/>
+  <text class="h2 center" x="415" y="158">Tokio socket task</text><text class="small center" x="415" y="184">shared runtime worker</text>
+  <rect class="actorState" x="585" y="125" width="250" height="88" rx="13"/>
+  <text class="h2 center" x="710" y="158">Completion queue</text><text class="small center" x="710" y="184">bounded, contains bytes</text>
+  <rect class="actorState" x="875" y="125" width="250" height="88" rx="13"/>
+  <text class="h2 center" x="1000" y="158">ReadyState broker</text><text class="small center" x="1000" y="184">flags + revisions</text>
+  <rect class="actorV8" x="1165" y="125" width="290" height="88" rx="13"/>
+  <text class="h2 center" x="1310" y="158">V8 executor thread</text><text class="small center" x="1310" y="184">owns isolate + selector</text>
+  <rect class="actorV8" x="1495" y="125" width="360" height="88" rx="13"/>
+  <text class="h2 center" x="1675" y="158">Guest JS NetSocket</text><text class="small center" x="1675" y="184">readiness target + Duplex</text>
+
+  <line class="life" x1="140" y1="213" x2="140" y2="1720"/>
+  <line class="life" x1="415" y1="213" x2="415" y2="1720"/>
+  <line class="life" x1="710" y1="213" x2="710" y2="1720"/>
+  <line class="life" x1="1000" y1="213" x2="1000" y2="1720"/>
+  <line class="life" x1="1310" y1="213" x2="1310" y2="1720"/>
+  <line class="life" x1="1675" y1="213" x2="1675" y2="1720"/>
+
+  <rect class="band" x="20" y="245" width="1860" height="285" rx="12"/>
+  <text class="h2" x="45" y="278">A. Tokio discovers work and stores it</text>
+  <circle class="step" cx="265" cy="325" r="15"/><text class="stepText" x="265" y="325">1</text>
+  <path class="cyan" d="M140 325H415"/>
+  <text class="body" x="175" y="312">fd readable → Tokio Waker schedules socket future</text>
+  <circle class="step" cx="265" cy="395" r="15"/><text class="stepText" x="265" y="395">2</text>
+  <path class="cyan" d="M415 395H140"/>
+  <text class="body" x="180" y="382">bounded try_read() turn</text>
+  <path class="cyan return" d="M140 435H415"/>
+  <text class="mono" x="175" y="424">bytes: [48 65 6c 6c 6f]</text>
+  <circle class="step" cx="565" cy="480" r="15"/><text class="stepText" x="565" y="480">3</text>
+  <path class="cyan" d="M415 480H710"/>
+  <text class="body" x="450" y="467">send Data(bytes, accounting reservation)</text>
+  <text class="small" x="745" y="485">If full, this task stops reading; the bytes remain in the kernel.</text>
+
+  <rect class="band" x="20" y="555" width="1860" height="350" rx="12"/>
+  <text class="h2" x="45" y="588">B. The same publisher rings one coalesced doorbell</text>
+  <circle class="step" cx="705" cy="640" r="15"/><text class="stepText" x="705" y="640">4</text>
+  <path class="amber" d="M415 640H1000"/>
+  <text class="mono" x="500" y="627">publish(cap=42, gen=3, READABLE)</text>
+  <rect class="note" x="860" y="675" width="430" height="95" rx="10"/>
+  <text class="body" x="885" y="705">ReadyState[42].flags |= READABLE</text>
+  <text class="body" x="885" y="733">ReadyState[42].revision += 1</text>
+  <text class="small" x="885" y="758">Repeated publications overwrite/merge this entry.</text>
+  <circle class="step" cx="1150" cy="810" r="15"/><text class="stepText" x="1150" y="810">5</text>
+  <path class="amber" d="M1000 810H1310"/>
+  <text class="mono" x="1030" y="797">ReadyWake { generation, epoch }</text>
+  <text class="small" x="1030" y="842">Internally: Tokio MPSC[1] staging → immediate crossbeam[1] transfer.</text>
+  <text class="small" x="1030" y="864">No bytes, socket event, packet count, or revision list is in the wake.</text>
+
+  <rect class="band" x="20" y="930" width="1860" height="405" rx="12"/>
+  <text class="h2" x="45" y="963">C. The V8 thread notices the wake and enters JavaScript itself</text>
+  <rect class="actorV8" x="1180" y="990" width="260" height="67" rx="10"/>
+  <text class="body center" x="1310" y="1018">crossbeam Select unblocks</text>
+  <text class="small center" x="1310" y="1041">Tokio did not enter V8</text>
+  <circle class="step" cx="1150" cy="1095" r="15"/><text class="stepText" x="1150" y="1095">6</text>
+  <path class="amber" d="M1310 1095H1000"/>
+  <text class="mono" x="1040" y="1082">take_batch(epoch)</text>
+  <path class="amber return" d="M1000 1140H1310"/>
+  <text class="mono" x="1025" y="1128">[(cap=42, gen=3, flags=R, revision=9)]</text>
+  <circle class="step" cx="1490" cy="1195" r="15"/><text class="stepText" x="1490" y="1195">7</text>
+  <path class="violet" d="M1310 1195H1675"/>
+  <text class="mono" x="1340" y="1182">V8 Function::call(_agentOSReadyDispatch, 42, 3, R)</text>
+  <rect class="note" x="1495" y="1225" width="360" height="82" rx="10"/>
+  <text class="body" x="1520" y="1254">JS Map lookup → wakeSocketBridgeReads()</text>
+  <text class="small" x="1520" y="1282">Queues a JS microtask; still on the V8 thread.</text>
+
+  <rect class="band" x="20" y="1360" width="1860" height="365" rx="12"/>
+  <text class="h2" x="45" y="1393">D. JavaScript fetches bytes over a call-specific bridge response</text>
+  <circle class="step" cx="1490" cy="1445" r="15"/><text class="stepText" x="1490" y="1445">8</text>
+  <path class="green" d="M1675 1445C1490 1445 1490 1505 710 1505"/>
+  <text class="mono" x="1010" y="1433">_netSocketReadRaw.applySync(socketId)</text>
+  <text class="small" x="1030" y="1460">V8 executor blocks only itself while the registered call waiter settles.</text>
+  <path class="green return" d="M710 1545C1040 1545 1390 1580 1675 1580"/>
+  <text class="mono" x="1010" y="1564">dequeue Data → direct response → actual bytes</text>
+  <circle class="step" cx="1490" cy="1610" r="15"/><text class="stepText" x="1490" y="1610">9</text>
+  <text class="body" x="1518" y="1616">Readable.push(bytes)</text>
+  <circle class="step" cx="1150" cy="1685" r="15"/><text class="stepText" x="1150" y="1685">10</text>
+  <path class="amber" d="M1310 1685H1000"/>
+  <text class="mono" x="1030" y="1672">complete_batch(epoch, observed revisions)</text>
+  <text class="small" x="1030" y="1708">Clears only unchanged observations; newer revisions cause a replacement wake.</text>
+
+  <rect class="danger" x="45" y="1748" width="1810" height="48" rx="10"/>
+  <text class="body center" x="950" y="1778">Important: the readiness path wakes V8; the bridge read path transports bytes. They are separate so millions of readiness signals cannot become millions of queued payload messages.</text>
+</svg>

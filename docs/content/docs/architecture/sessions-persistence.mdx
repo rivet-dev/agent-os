@@ -1,6 +1,6 @@
 ---
 title: "Sessions & Persistence"
-description: "How AgentOS stores exact ACP history and restores adapters through VM SQLite."
+description: "Learn how agentOS stores exact Agent Client Protocol history in VM SQLite and restores adapters, sessions, and transcripts after wake."
 ---
 
 SQLite is the AgentOS source of truth for public session metadata, prompts, pending requests, and durable ACP events. Adapter-owned session files or databases remain private adapter state; AgentOS does not mirror them into the VFS or import adapter replay into public history.
