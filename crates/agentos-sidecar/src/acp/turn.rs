@@ -1017,20 +1017,24 @@ impl DurableUpdateSink {
         }
 
         // Tool, plan, mode, and other durable updates may be interleaved with
-        // message deltas. Keep their native order inside the in-progress
-        // completion buffer instead of treating them as a message boundary.
-        if self.buffered_kind.is_some() {
-            self.buffered_bytes = checked_acp_bytes(
-                &self.user_session_id,
-                self.buffered_bytes,
-                update_bytes,
-                self.limits.max_completed_message_bytes,
-                "limits.acp.maxCompletedMessageBytes",
-            )?;
-            self.buffered.push(update);
-        } else {
-            self.persist(ctx, events, vec![update]).await?;
-        }
+        // message deltas. Commit the in-progress text run first, then this
+        // update, so it reaches the host the moment the adapter produces it.
+        //
+        // Holding it in the completion buffer instead would keep it invisible
+        // until the next message boundary: an agent that streams any text
+        // before calling a tool (Pi prints a banner chunk on some turns) arms
+        // the buffer, and every later `tool_call` / `tool_call_update` is then
+        // withheld until the *post-tool* message arrives — so a
+        // `tool_call_update { in_progress }` for a `sleep 60` reaches the host
+        // only when the command finishes, and a caller waiting on that
+        // boundary before cancelling never gets a live turn to cancel.
+        //
+        // The durable sequence is unchanged: `coalesce_completed_message`
+        // already ends the text run it is building at any non-text update, so
+        // flushing here emits the same events in the same order, just in more
+        // (smaller) batches.
+        self.flush(ctx, events).await?;
+        self.persist(ctx, events, vec![update]).await?;
         Ok(true)
     }
 
