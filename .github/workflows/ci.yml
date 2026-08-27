@@ -46,7 +46,6 @@ jobs:
             npx turbo build \
               --only \
               --concurrency=4 \
-              --filter='!@rivet-dev/agentos-website' \
               --filter='!@agentos-software/codex' \
               --filter='!@rivet-dev/agentos-browser' \
               --filter='!@rivet-dev/agentos-runtime-browser' \

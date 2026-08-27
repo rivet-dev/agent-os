@@ -260,7 +260,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
           registry-url: https://registry.npmjs.org
-      - run: pnpm install --frozen-lockfile --filter='!@rivet-dev/agentos-website'
+      - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: wasm-commands
@@ -310,7 +310,6 @@ jobs:
           # Browser support is retained in-tree but intentionally disabled until
           # it has a reactor/security design independent of the native sidecar.
           npx turbo build \
-            --filter='!@rivet-dev/agentos-website' \
             --filter='!@rivet-dev/agentos-browser' \
             --filter='!@rivet-dev/agentos-runtime-browser' \
             --filter='!@rivet-dev/agentos-playground' \
@@ -436,7 +435,7 @@ jobs:
           key: ${{ runner.os }}-x86_64-unknown-linux-gnu-rusty-v8-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-x86_64-unknown-linux-gnu-rusty-v8-
-      - run: pnpm install --frozen-lockfile --filter='!@rivet-dev/agentos-website'
+      - run: pnpm install --frozen-lockfile
       - name: Bump Cargo versions
         run: |
           pnpm --filter=publish exec tsx src/ci/bin.ts bump-versions \
