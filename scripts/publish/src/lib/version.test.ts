@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DEFAULT_SIDECAR_PLATFORMS } from "./packages.js";
-import { bumpCargoVersions, bumpPackageJsons } from "./version.js";
+import {
+	bumpCargoVersions,
+	bumpPackageJsons,
+	githubRepositoryUrl,
+} from "./version.js";
 
 async function writeJson(root: string, rel: string, value: unknown) {
 	const path = join(root, rel);
@@ -105,7 +109,9 @@ test("bumpPackageJsons injects sidecar platform optional dependencies", async ()
 			});
 		}
 
-		await bumpPackageJsons(repoRoot, "0.3.0");
+		await bumpPackageJsons(repoRoot, "0.3.0", {
+			repository: "rivet-dev/agentos",
+		});
 
 		const sidecarManifest = JSON.parse(
 			await readFile(
@@ -129,6 +135,11 @@ test("bumpPackageJsons injects sidecar platform optional dependencies", async ()
 				"utf8",
 			),
 		);
+		assert.deepEqual(sidecarManifest.repository, {
+			type: "git",
+			url: "https://github.com/rivet-dev/agentos.git",
+			directory: "packages/sidecar-binary",
+		});
 		assert.deepEqual(
 			runtimeSidecarManifest.optionalDependencies,
 			Object.fromEntries(
@@ -178,6 +189,7 @@ test("bumpPackageJsons pins lockstep and independent AgentOS Apps runtimes", asy
 		}
 
 		await bumpPackageJsons(repoRoot, "0.0.0-preview.abc1234", {
+			repository: "rivet-dev/agentos",
 			resolveNpmLatestVersion: async (name) => {
 				assert.equal(name, "@agentos-software/tar");
 				return "0.3.5";
@@ -198,4 +210,16 @@ test("bumpPackageJsons pins lockstep and independent AgentOS Apps runtimes", asy
 	} finally {
 		await rm(repoRoot, { recursive: true, force: true });
 	}
+});
+
+test("githubRepositoryUrl validates owner/repo slugs", () => {
+	assert.equal(
+		githubRepositoryUrl("rivet-dev/agentos"),
+		"https://github.com/rivet-dev/agentos.git",
+	);
+	assert.throws(() => githubRepositoryUrl("rivet-dev"), /expected owner\/repo/);
+	assert.throws(
+		() => githubRepositoryUrl("https://github.com/rivet-dev/agentos"),
+		/expected owner\/repo/,
+	);
 });
