@@ -3720,6 +3720,15 @@ fn dispatch_ready_batch_callbacks(
             entry.flags,
         );
         tc.perform_microtask_checkpoint();
+        // An out-of-band termination (the near-heap-limit guard) makes every
+        // guest call return nothing, which is indistinguishable from a missing
+        // target here. Reporting it as one would retire the capability's level
+        // flags against an isolate that can no longer run any JavaScript, and
+        // the session would idle forever instead of failing. Surface it as the
+        // termination it is; the caller cancels it and reports the execution.
+        if tc.has_terminated() {
+            return EventLoopStatus::Terminated;
+        }
         if let Some(exception) = tc.exception() {
             let (code, error) = execution::exception_to_result(tc, exception);
             return EventLoopStatus::Failed(code, error);
