@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 
@@ -746,26 +746,77 @@ impl SnapshotCache {
     }
 }
 
+/// How many distinct (bridge, userland) pairs keep a memoized digest. A process
+/// sees one bridge bundle and a handful of userland bundles, so this is sized for
+/// "all of them" rather than for eviction pressure.
+const SNAPSHOT_KEY_MEMO_CAPACITY: usize = 4;
+
+struct SnapshotKeyMemoEntry {
+    bridge_code: Box<str>,
+    userland_code: Option<Box<str>>,
+    key: SnapshotCacheKey,
+}
+
+impl SnapshotKeyMemoEntry {
+    fn matches(&self, bridge_code: &str, userland_code: Option<&str>) -> bool {
+        &*self.bridge_code == bridge_code && self.userland_code.as_deref() == userland_code
+    }
+}
+
+fn snapshot_key_memo() -> &'static Mutex<Vec<SnapshotKeyMemoEntry>> {
+    static MEMO: OnceLock<Mutex<Vec<SnapshotKeyMemoEntry>>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 /// Cache key over bridge + optional userland code. With no userland this is just
 /// the sha256 of the bridge code (a NUL separator is only added when userland is
 /// present), so existing bridge-only entries keep their historical keys.
+///
+/// The digest is memoized by content. The bridge bundle alone is ~2.5 MB, and
+/// every execution derives this key several times (the snapshot-cache lookup plus
+/// the warm-worker pool key on both the pre-warm and the claim path), so the
+/// re-digesting cost ~7 ms per call. Matching by full content equality — a memcmp,
+/// roughly 35x cheaper than the digest — keeps the memo indistinguishable from
+/// recomputing: it can only return the key of a bundle byte-identical to the one
+/// asked for, so no caller can observe another caller's bundle through it.
 pub fn snapshot_cache_key(bridge_code: &str, userland_code: Option<&str>) -> SnapshotCacheKey {
-    match userland_code {
-        None => {
-            let mut hasher = Sha256::new();
-            hasher.update(bridge_code.as_bytes());
-            hasher.finalize().into()
-        }
-        Some(userland_code) => {
-            let mut buf = Vec::with_capacity(bridge_code.len() + 1 + userland_code.len());
-            buf.extend_from_slice(bridge_code.as_bytes());
-            buf.push(0);
-            buf.extend_from_slice(userland_code.as_bytes());
-            let mut hasher = Sha256::new();
-            hasher.update(&buf);
-            hasher.finalize().into()
-        }
+    if let Some(key) = snapshot_key_memo()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.matches(bridge_code, userland_code))
+        .map(|entry| entry.key)
+    {
+        return key;
     }
+
+    let key = compute_snapshot_cache_key(bridge_code, userland_code);
+
+    let mut memo = snapshot_key_memo().lock().unwrap();
+    if !memo
+        .iter()
+        .any(|entry| entry.matches(bridge_code, userland_code))
+    {
+        if memo.len() >= SNAPSHOT_KEY_MEMO_CAPACITY {
+            memo.remove(0);
+        }
+        memo.push(SnapshotKeyMemoEntry {
+            bridge_code: Box::from(bridge_code),
+            userland_code: userland_code.map(Box::from),
+            key,
+        });
+    }
+    key
+}
+
+fn compute_snapshot_cache_key(bridge_code: &str, userland_code: Option<&str>) -> SnapshotCacheKey {
+    let mut hasher = Sha256::new();
+    hasher.update(bridge_code.as_bytes());
+    if let Some(userland_code) = userland_code {
+        hasher.update([0u8]);
+        hasher.update(userland_code.as_bytes());
+    }
+    hasher.finalize().into()
 }
 
 #[doc(hidden)]
@@ -2100,6 +2151,31 @@ mod tests {
             snapshot_cache_key("a", Some("bc")),
             "the bridge/userland split must be unambiguous"
         );
+    }
+
+    #[test]
+    fn snapshot_cache_key_memo_agrees_with_a_fresh_digest() {
+        // The memo must be indistinguishable from recomputing, including after it
+        // has been filled past its capacity and the earliest entries evicted.
+        let inputs: Vec<(String, Option<String>)> = (0..SNAPSHOT_KEY_MEMO_CAPACITY + 3)
+            .flat_map(|index| {
+                let bridge = format!("memo-bridge-{index}");
+                [
+                    (bridge.clone(), None),
+                    (bridge, Some(format!("memo-userland-{index}"))),
+                ]
+            })
+            .collect();
+
+        for round in 0..3 {
+            for (bridge, userland) in &inputs {
+                assert_eq!(
+                    snapshot_cache_key(bridge, userland.as_deref()),
+                    compute_snapshot_cache_key(bridge, userland.as_deref()),
+                    "round {round}: memoized key must equal a fresh digest for {bridge}"
+                );
+            }
+        }
     }
 
     #[test]
