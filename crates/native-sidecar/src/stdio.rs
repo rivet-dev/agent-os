@@ -1046,6 +1046,7 @@ async fn run_async(
     let mut pending_frame: Option<AccountedProtocolFrame> = None;
     let mut limit_warning_closed = false;
     let mut stdin_closed = false;
+    let mut event_round_rotation = 0usize;
     'protocol: loop {
         // Fairness (odw-43s): service queued VM events once per turn, before
         // taking on more work. Doing it here rather than only in the wake arms
@@ -1060,6 +1061,7 @@ async fn run_async(
             &frame_writer,
             &active_sessions,
             &event_ready_tx,
+            &mut event_round_rotation,
         )
         .await?;
 
@@ -1788,6 +1790,23 @@ fn enqueue_stdin_frame(
     })
 }
 
+/// The emit round in `service_process_events` walks the sessions one frame at a
+/// time, so sessions are served fairly *within* a round — but the frame budget is
+/// global, so a round that hits the cap stops partway down the list. Always
+/// starting at the same end would therefore starve every session past the cap
+/// outright once more than `vm_quantum_operations` sessions (default 64,
+/// `crates/runtime/src/lib.rs`) are emitting: every round would serve the same
+/// leading 64 and never reach the rest. Advancing the starting point by one per
+/// round moves the cut instead of pinning it.
+fn rotated_sessions(sessions: &BTreeSet<SessionScope>, rotation: usize) -> Vec<SessionScope> {
+    let mut sessions = sessions.iter().cloned().collect::<Vec<_>>();
+    let len = sessions.len();
+    if len > 0 {
+        sessions.rotate_left(rotation % len);
+    }
+    sessions
+}
+
 /// One bounded round of process-event servicing: pump every active session's
 /// queued execution events into the durable sidecar queues, then emit at most
 /// `runtime.fairness.vm_quantum_operations` event frames.
@@ -1809,13 +1828,20 @@ fn enqueue_stdin_frame(
 /// control lane admits only sidecar responses and shutdown. Whatever the cap
 /// leaves behind re-arms `event_ready_tx`, so the next turn resumes it after
 /// stdin has had its own.
+///
+/// The cap is global across sessions rather than per session — a per-session cap
+/// would make one round cost `sessions * quantum` frames and put the cancel lane
+/// back behind a wait that grows with tenant count. `rotated_sessions` is what
+/// keeps the global cap fair across sessions; see its comment.
 async fn service_process_events(
     sidecar: &mut NativeSidecar<LocalBridge>,
     writer: &ProtocolFrameWriter,
     active_sessions: &BTreeSet<SessionScope>,
     event_ready_tx: &Sender<()>,
+    rotation: &mut usize,
 ) -> Result<(), Box<dyn Error>> {
-    let sessions = active_sessions.iter().cloned().collect::<Vec<_>>();
+    let sessions = rotated_sessions(active_sessions, *rotation);
+    *rotation = rotation.wrapping_add(1);
     for session in &sessions {
         sidecar
             .pump_process_events(&session.compat_ownership_scope())
@@ -2178,6 +2204,37 @@ mod tests {
             matches!(request.payload, RequestPayload::CancelExecutionRequest(_)),
             "the stdin lane must carry the cancel, not a substitute frame"
         );
+    }
+
+    /// The emit budget in `service_process_events` is global, so the round's
+    /// starting session must advance — otherwise every session past the cap
+    /// starves permanently once more than `vm_quantum_operations` sessions are
+    /// emitting.
+    #[test]
+    fn event_emission_rounds_start_at_a_rotating_session() {
+        let sessions = (0..3)
+            .map(|index| SessionScope {
+                connection_id: String::from("conn-1"),
+                session_id: format!("session-{index}"),
+            })
+            .collect::<BTreeSet<_>>();
+
+        let starts = (0..4)
+            .map(|rotation| rotated_sessions(&sessions, rotation)[0].session_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(starts, ["session-0", "session-1", "session-2", "session-0"]);
+
+        // Every round still offers every session; only the order shifts.
+        for rotation in 0..4 {
+            assert_eq!(
+                rotated_sessions(&sessions, rotation)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                sessions,
+            );
+        }
+
+        assert!(rotated_sessions(&BTreeSet::new(), 7).is_empty());
     }
 
     #[test]

@@ -41,6 +41,12 @@ The fix is therefore a round-robin, not a priority swap:
   every active session, then emit at most
   `runtime.fairness.vm_quantum_operations` event frames. Work left over by the
   cap re-arms `event_ready_tx` so the next turn resumes it.
+- That cap is global across sessions, not per session, so one round stays cheap
+  however many tenants are attached. The emit pass itself walks the sessions one
+  frame at a time, so they share a round fairly; `rotated_sessions` then advances
+  the round's starting session by one per call so the point where the cap cuts
+  the list moves. Without that rotation, more than `vm_quantum_operations`
+  emitting sessions would leave everything past the cap permanently unserved.
 - The `'protocol` loop calls it once per turn, at the top, before taking on more
   work. Every path that handles a frame (the `pending_frame` park, the stdin
   arm, the control lane) comes back through there, so a pipelining host can no
