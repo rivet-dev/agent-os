@@ -1110,6 +1110,57 @@ async fn run_async(
                     }
                 }
             }
+            // Fairness (odw-43s): the two event-pump arms sit ABOVE `stdin_rx`.
+            // `biased` polls arms in order and takes the first ready one, so
+            // with stdin first a host that pipelines requests keeps that arm
+            // permanently ready and NO VM's queued output is ever flushed —
+            // one tenant's request stream starves every other tenant's events.
+            // Both arms are bounded (the drain only empties what is already
+            // queued and never produces; the pump is capped by
+            // `runtime.fairness.vm_quantum_operations` and the pending-event
+            // capacity), so they cannot starve stdin in return. The control
+            // lane stays above them: cancels and permission replies must still
+            // outrank routine event flushing.
+            maybe_ready = event_ready_rx.recv() => {
+                let Some(()) = maybe_ready else {
+                    break;
+                };
+                loop {
+                    let mut emitted_frame = false;
+                    for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
+                        if let Some(frame) = sidecar
+                            .poll_event_wire(&session.ownership_scope(), Duration::ZERO)
+                            .await?
+                        {
+                            send_output_frame(&frame_writer, ProtocolFrame::EventFrame(frame))?;
+                            emitted_frame = true;
+                        }
+                    }
+
+                    if !emitted_frame {
+                        break;
+                    }
+                }
+                flush_sidecar_requests(&mut sidecar, &frame_writer)?;
+            }
+            _ = process_event_notify.notified() => {
+                for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
+                    if sidecar.pump_process_events(&session.compat_ownership_scope()).await? {
+                        match event_ready_tx.try_send(()) {
+                            Ok(())
+                            | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::BrokenPipe,
+                                    "event-ready wake receiver closed",
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                }
+                flush_sidecar_requests(&mut sidecar, &frame_writer)?;
+            }
             maybe_frame = stdin_rx.recv(), if !stdin_closed => {
                 match maybe_frame {
                     Some(frame) => {
@@ -1167,46 +1218,6 @@ async fn run_async(
                         limit_warning_closed = true;
                     }
                 }
-            }
-            maybe_ready = event_ready_rx.recv() => {
-                let Some(()) = maybe_ready else {
-                    break;
-                };
-                loop {
-                    let mut emitted_frame = false;
-                    for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
-                        if let Some(frame) = sidecar
-                            .poll_event_wire(&session.ownership_scope(), Duration::ZERO)
-                            .await?
-                        {
-                            send_output_frame(&frame_writer, ProtocolFrame::EventFrame(frame))?;
-                            emitted_frame = true;
-                        }
-                    }
-
-                    if !emitted_frame {
-                        break;
-                    }
-                }
-                flush_sidecar_requests(&mut sidecar, &frame_writer)?;
-            }
-            _ = process_event_notify.notified() => {
-                for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
-                    if sidecar.pump_process_events(&session.compat_ownership_scope()).await? {
-                        match event_ready_tx.try_send(()) {
-                            Ok(())
-                            | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::BrokenPipe,
-                                    "event-ready wake receiver closed",
-                                )
-                                .into());
-                            }
-                        }
-                    }
-                }
-                flush_sidecar_requests(&mut sidecar, &frame_writer)?;
             }
             maybe_write_error = write_error_rx.recv() => {
                 if let Some(error) = maybe_write_error {
