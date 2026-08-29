@@ -1192,6 +1192,7 @@ fn error_response(error: SidecarError) -> AcpResponse {
 fn error_code(error: &SidecarError) -> String {
     let code = match error {
         SidecarError::ResourceLimit(_) => "resource_limit",
+        SidecarError::PackageNoExecutables(_) => "package_no_executables",
         SidecarError::InvalidState(message) => message
             .split_once(':')
             .map(|(prefix, _)| prefix)

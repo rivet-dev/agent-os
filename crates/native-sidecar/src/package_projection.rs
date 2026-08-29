@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::state::SidecarError;
@@ -385,6 +386,59 @@ fn read_aospkg_manifest_chunk(path: &Path) -> Result<v1::PackageManifest, Sideca
     // startup-critical chunk1 read shared with every host-side consumer.
     read_manifest_chunk_from_file(path)
         .map_err(|error| SidecarError::InvalidState(error.to_string()))
+}
+
+/// Validate that every advertised command resolves to an executable regular file. Manifest
+/// metadata is not proof that its payload was packed correctly; projecting an unchecked target
+/// would create a broken `/opt/agentos/bin` symlink and defer the failure until a guest command.
+pub fn require_package_executables(package: &PackageDescriptor) -> Result<(), SidecarError> {
+    let invalid = |detail: String| {
+        SidecarError::PackageNoExecutables(format!(
+            "ERR_AGENTOS_PACKAGE_NO_EXECUTABLES: configured package {:?} at {:?} {detail}",
+            package.name, package.dir
+        ))
+    };
+    if package.commands.is_empty() {
+        return Err(invalid(String::from("contributes no executable commands")));
+    }
+
+    if let Some(tar_path) = package.tar_ref() {
+        let mut fs = TarFileSystem::open(tar_path).map_err(|error| {
+            invalid(format!("cannot inspect command payload: {error}"))
+        })?;
+        for target in &package.commands {
+            let path = normalize_path(&target.entry);
+            let stat = fs.stat(&path).map_err(|error| {
+                invalid(format!(
+                    "declares command {:?} with missing target {:?}: {error}",
+                    target.command, target.entry
+                ))
+            })?;
+            if stat.mode & 0o170000 != 0o100000 || stat.mode & 0o111 == 0 {
+                return Err(invalid(format!(
+                    "declares command {:?} with non-executable target {:?}",
+                    target.command, target.entry
+                )));
+            }
+        }
+    } else {
+        for target in &package.commands {
+            let path = Path::new(&package.dir).join(target.entry.trim_start_matches('/'));
+            let metadata = fs::metadata(&path).map_err(|error| {
+                invalid(format!(
+                    "declares command {:?} with missing target {:?}: {error}",
+                    target.command, target.entry
+                ))
+            })?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                return Err(invalid(format!(
+                    "declares command {:?} with non-executable target {:?}",
+                    target.command, target.entry
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn build_package_leaf_mounts(

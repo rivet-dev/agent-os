@@ -649,7 +649,6 @@ where
             .map(crate::wire::permissions_policy_config_from_wire)
             .unwrap_or_else(|| original_permissions.clone());
         validate_permissions_policy(&configured_permissions)?;
-        bridge.set_vm_permissions(&vm_id, &allow_all_policy())?;
         let mut effective_mounts = payload.mounts.clone();
         append_module_access_mount(&mut effective_mounts, payload.module_access_cwd.as_ref())?;
         let package_descriptors = package_descriptors_from_wire(&payload.packages)?;
@@ -668,8 +667,11 @@ where
         let package_mounts =
             build_packages_projection(&vm_id, &package_descriptors, &payload.packages_mount_at)?;
         effective_mounts.extend(package_mounts);
-        apply_package_provides_env(&mut vm.guest_env, &package_descriptors);
         append_package_provides_mounts(&mut effective_mounts, &package_descriptors)?;
+        // All package validation that can reject the request must happen before this temporary
+        // escalation. From here onward, every failure is covered by the fail-closed rollback.
+        bridge.set_vm_permissions(&vm_id, &allow_all_policy())?;
+        apply_package_provides_env(&mut vm.guest_env, &package_descriptors);
         let reconfigure_result = reconcile_mounts(
             mount_plugins,
             vm,
@@ -816,6 +818,7 @@ where
         let vm = self.vms.get_mut(&vm_id).expect("owned VM should exist");
         let descriptor =
             crate::package_projection::read_package_manifest_from_path(&payload.package.path)?;
+        crate::package_projection::require_package_executables(&descriptor)?;
         let new_mounts = build_packages_projection(
             &vm_id,
             std::slice::from_ref(&descriptor),
@@ -2336,7 +2339,12 @@ fn package_descriptors_from_wire(
 ) -> Result<Vec<crate::package_projection::PackageDescriptor>, SidecarError> {
     packages
         .iter()
-        .map(|package| crate::package_projection::read_package_manifest_from_path(&package.path))
+        .map(|package| {
+            let descriptor =
+                crate::package_projection::read_package_manifest_from_path(&package.path)?;
+            crate::package_projection::require_package_executables(&descriptor)?;
+            Ok(descriptor)
+        })
         .collect()
 }
 
@@ -3182,10 +3190,10 @@ mod tests {
         bootstrap_native_root_filesystem, bootstrap_shadow_root, close_vm_admission,
         create_vm_unix_socket_host_dir, initialize_vm_shadow_root,
         materialize_shadow_root_snapshot_entries, native_root_plugin_from_config,
-        prune_kernel_command_stub, retire_vm_fairness, shadow_path_for_guest, vm_quarantine_reason,
-        vm_resource_ledger, wait_for_vm_reconciliation, CA_CERTIFICATES_BUNDLE,
-        CA_CERTIFICATES_GUEST_PATH, CA_CERTIFICATES_SYMLINK_PATH, CA_CERTIFICATES_SYMLINK_TARGET,
-        KERNEL_COMMAND_STUB,
+        package_descriptors_from_wire, prune_kernel_command_stub, retire_vm_fairness,
+        shadow_path_for_guest, vm_quarantine_reason, vm_resource_ledger,
+        wait_for_vm_reconciliation, CA_CERTIFICATES_BUNDLE, CA_CERTIFICATES_GUEST_PATH,
+        CA_CERTIFICATES_SYMLINK_PATH, CA_CERTIFICATES_SYMLINK_TARGET, KERNEL_COMMAND_STUB,
     };
     use crate::bridge::MountPluginContext;
     use crate::plugins::chunked_local::ChunkedLocalMountPlugin;
@@ -3219,6 +3227,33 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn configured_package_without_executables_is_a_typed_boot_error() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let package = std::env::temp_dir().join(format!("agentos-empty-package-{nonce}"));
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("agentos-package.json"),
+            r#"{"name":"empty-canary","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let error = package_descriptors_from_wire(&[crate::protocol::PackageDescriptor {
+            path: package.to_string_lossy().into_owned(),
+        }])
+        .expect_err("an empty software package must not boot silently");
+        assert!(matches!(error, crate::state::SidecarError::PackageNoExecutables(_)));
+        assert_eq!(
+            crate::execution::javascript::rpc::error_code(&error),
+            "ERR_AGENTOS_PACKAGE_NO_EXECUTABLES"
+        );
+        assert!(error.to_string().contains("empty-canary"));
+        let _ = fs::remove_dir_all(package);
+    }
 
     fn reconciliation_handles(
         generation: u64,
