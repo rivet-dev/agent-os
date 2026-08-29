@@ -880,7 +880,6 @@ pub(crate) struct VmState {
     /// Process IDs remain internal routing details in `execution_processes`.
     pub(crate) executions: BTreeMap<String, ManagedLanguageExecution>,
     pub(crate) execution_processes: BTreeMap<String, String>,
-    pub(crate) next_public_execution_id: u64,
     pub(crate) execution_retention_wake_deadline_ms: Option<u64>,
     pub(crate) execution_retention_wake_task: Option<tokio::task::JoinHandle<()>>,
     /// The VM filesystem is shared across executions, so package-manager
