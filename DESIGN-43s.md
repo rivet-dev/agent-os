@@ -5,22 +5,52 @@ Scope: `crates/native-sidecar/src/stdio.rs`, beads `odw-43s`.
 ## What shipped
 
 The `biased` `tokio::select!` in `run_async` (`stdio.rs`, the `'protocol` loop)
-polls arms in declaration order and services the first ready one. `stdin_rx`
-sat **above** both event-pump arms (`event_ready_rx`, `process_event_notify`),
-so a host that pipelines requests keeps `stdin_rx` permanently ready and no
-VM's queued output is ever flushed — one tenant's request stream starves every
-other tenant's events indefinitely.
+polls arms in declaration order and services the first ready one. With
+`stdin_rx` **above** both event-pump arms (`event_ready_rx`,
+`process_event_notify`), a host that pipelines requests keeps `stdin_rx`
+permanently ready and no VM's queued output is ever flushed — one tenant's
+request stream starves every other tenant's events indefinitely.
 
-Fix: the two event-pump arms now sit above `stdin_rx` and below the control
-lane. Both are bounded, so they cannot starve stdin in return:
+Reordering the arms does not fix that; it inverts which lane starves, and the
+inverted form is the worse of the two. Neither event arm is self-limiting under
+load:
 
-- the drain arm only empties what is already queued (it calls
-  `poll_event_wire`, never `pump_process_events`, so the queue can only shrink);
-- the pump arm is capped by `runtime.fairness.vm_quantum_operations` per VM and
-  by the pending-process-event capacity.
+- `ActiveProcess::queue_pending_execution_event` calls
+  `process_event_notify.notify_one()` for *every* queued execution event
+  (`execution/process.rs:243`, `:374`), and `pump_process_events` re-arms the
+  notify itself whenever a VM burns its `runtime.fairness.vm_quantum_operations`
+  quantum (`execution/process_events.rs:531`). A guest emitting sustained stdout
+  keeps a `Notify` permit stored at essentially all times.
+- The drain is not a pure drain either: `poll_event` with a zero timeout still
+  pulls `process_event_receiver` into `pending_process_events`
+  (`service.rs:1694-1717`), so the guest refills it as fast as the loop empties
+  it.
 
-Ordering is now: shutdown → control lane (cancels, permission replies) → event
-drain → process-event pump → new stdin requests → limit warnings → write errors.
+And `stdin_rx` is the cancel lane, not merely the new-work lane:
+`route_decoded_combined_frame` (`stdio.rs`) sends every
+`ProtocolFrame::RequestFrame` — `cancel_execution` included
+(`language_execution.rs:1637`) — to `stdin_tx`, while
+`route_decoded_control_frame` admits only `SidecarResponseFrame` and shutdown
+`ControlFrame`s to `stdin_control_tx`. Put above stdin, the event arms let one
+untrusted guest stall the whole multi-tenant process's request lane *and* make
+its own flood uncancellable.
+
+The fix is therefore a round-robin, not a priority swap:
+
+- `service_process_events` (`stdio.rs`) performs one **bounded** round — pump
+  every active session, then emit at most
+  `runtime.fairness.vm_quantum_operations` event frames. Work left over by the
+  cap re-arms `event_ready_tx` so the next turn resumes it.
+- The `'protocol` loop calls it once per turn, at the top, before taking on more
+  work. Every path that handles a frame (the `pending_frame` park, the stdin
+  arm, the control lane) comes back through there, so a pipelining host can no
+  longer keep queued output unflushed.
+- Arm order is unchanged from before this work — both event-pump arms stay below
+  `stdin_rx` — and their bodies now only consume the edge that woke the loop.
+
+Ordering is: shutdown → control lane (sidecar responses, permission replies) →
+stdin requests (cancels included) → event-pump wakes → limit warnings → write
+errors, with one bounded event flush per turn regardless of which arm fired.
 
 ## What did NOT ship, and why
 
@@ -123,7 +153,12 @@ frames arrive while A's request is still outstanding. That test cannot be
 written today — it deadlocks on the inline `.await` — which is precisely the
 gap this design closes.
 
-The shipped ordering fix is not covered by a new test: it is a reorder of
-`select!` arms with no new logic, and reproducing the starvation deterministically
-needs a stdin flood that races the reader. Covered by the existing suite for
-regressions.
+The shipped fairness round is covered indirectly. Reproducing either starvation
+deterministically needs a real guest flooding stdout racing a pipelining host —
+`stdio_binary.rs` can host that test, but only once the restructure above makes
+the outcome deterministic rather than timing-dependent. What *is* pinned today
+is the fact the arm order rests on:
+`cancel_execution_is_admitted_on_the_stdin_lane_not_the_control_lane`
+(`stdio.rs` unit tests) fails if cancels ever move off `stdin_tx`, which is the
+only condition under which demoting stdin below the event arms would become
+defensible.
