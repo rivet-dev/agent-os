@@ -1069,6 +1069,17 @@ async fn run_async(
             biased;
             maybe_shutdown = shutdown_rx.recv() => {
                 let Some(control) = maybe_shutdown else {
+                    // The only shutdown sender lives in the response/control
+                    // reader, so this channel also closes when that reader dies
+                    // on an abnormal EOF or decode error — a transport failure,
+                    // not a graceful stop. The reader reports the failure on
+                    // `write_error_rx` *before* it exits, so a queued error here
+                    // is authoritative; without this check, whether the sidecar
+                    // exits 0 or 1 on a control-stream EOF is a race between
+                    // this arm and the `write_error_rx` arm below.
+                    if let Ok(error) = write_error_rx.try_recv() {
+                        return Err(io::Error::new(io::ErrorKind::BrokenPipe, error).into());
+                    }
                     break 'protocol;
                 };
                 match control.payload {
