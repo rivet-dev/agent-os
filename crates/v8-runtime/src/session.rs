@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(not(test))]
 use agentos_bridge::queue_tracker::warn_limit_exhausted;
-use agentos_bridge::queue_tracker::{register_queue, QueueGauge, TrackedLimit};
+use agentos_bridge::queue_tracker::{register_limit, register_queue, QueueGauge, TrackedLimit};
 use agentos_bridge::{bridge_contract, BridgeCallConvention};
 use agentos_runtime::accounting::{Reservation, ResourceClass, ResourceLedger};
 use agentos_runtime::metrics::{ExecutorMetricClass, RuntimeMetrics};
@@ -1043,8 +1043,24 @@ impl SessionShutdown {
     }
 }
 
-/// Concurrency slot tracker shared across session threads
-type SlotControl = Arc<(Mutex<usize>, Condvar)>;
+/// Concurrency slot tracker shared across session threads.
+struct SlotControlState {
+    active: Mutex<usize>,
+    cvar: Condvar,
+    gauge: Arc<QueueGauge>,
+}
+
+impl SlotControlState {
+    fn new(maximum: usize) -> Self {
+        Self {
+            active: Mutex::new(0),
+            cvar: Condvar::new(),
+            gauge: register_limit(TrackedLimit::GuestExecutions, maximum),
+        }
+    }
+}
+
+type SlotControl = Arc<SlotControlState>;
 
 /// An admitted V8 executor slot. It is acquired before spawning or assigning
 /// an OS thread and remains owned by that generation until the thread exits.
@@ -1061,8 +1077,8 @@ impl SessionSlotPermit {
         maximum: usize,
         metrics: RuntimeMetrics,
     ) -> Result<Self, String> {
-        let (lock, _) = &**control;
-        let mut active = lock
+        let mut active = control
+            .active
             .lock()
             .map_err(|_| String::from("ERR_AGENTOS_VM_EXECUTOR_POISONED: slot lock poisoned"))?;
         if *active >= maximum {
@@ -1071,6 +1087,7 @@ impl SessionSlotPermit {
             ));
         }
         *active += 1;
+        control.gauge.observe_depth(*active);
         metrics.observe_executor(ExecutorMetricClass::Vm, *active, 0);
         Ok(Self {
             control: Arc::clone(control),
@@ -1081,13 +1098,13 @@ impl SessionSlotPermit {
 
 impl Drop for SessionSlotPermit {
     fn drop(&mut self) {
-        let (lock, cvar) = &*self.control;
-        match lock.lock() {
+        match self.control.active.lock() {
             Ok(mut active) if *active > 0 => {
                 *active -= 1;
+                self.control.gauge.observe_depth(*active);
                 self.metrics
                     .observe_executor(ExecutorMetricClass::Vm, *active, 0);
-                cvar.notify_all();
+                self.control.cvar.notify_all();
             }
             Ok(_) => eprintln!(
                 "ERR_AGENTOS_VM_EXECUTOR_ACCOUNTING_UNDERFLOW: executor permit released at zero"
@@ -1261,7 +1278,7 @@ impl SessionManager {
             sessions: HashMap::new(),
             quarantined: Vec::new(),
             max_concurrency,
-            slot_control: Arc::new((Mutex::new(0), Condvar::new())),
+            slot_control: Arc::new(SlotControlState::new(max_concurrency)),
             event_tx: event_tx.into(),
             call_id_router,
             shared_call_id: Arc::new(AtomicU64::new(1)),
@@ -2010,8 +2027,7 @@ impl SessionManager {
     /// Number of sessions that have acquired a concurrency slot.
     #[allow(dead_code)]
     pub fn active_slot_count(&self) -> usize {
-        let (lock, _) = &*self.slot_control;
-        *lock.lock().unwrap()
+        *self.slot_control.active.lock().unwrap()
     }
 
     pub fn session_output_generation(&self, session_id: &str) -> Option<u64> {
@@ -3956,7 +3972,7 @@ mod tests {
 
     #[test]
     fn vm_executor_permits_report_active_and_high_water_metrics() {
-        let control: SlotControl = Arc::new((Mutex::new(0), Condvar::new()));
+        let control = Arc::new(SlotControlState::new(2));
         let metrics = RuntimeMetrics::new();
 
         let first = SessionSlotPermit::try_acquire(&control, 2, metrics.clone())
@@ -3979,6 +3995,80 @@ mod tests {
         let released = metrics.snapshot().executors[ExecutorMetricClass::Vm.index()].active;
         assert_eq!(released.current, 0);
         assert_eq!(released.high_water, 2);
+    }
+
+    #[test]
+    fn guest_execution_slots_are_tracked_and_warn_near_capacity() {
+        const SUBPROCESS_ENV: &str = "AGENTOS_GUEST_EXECUTION_SLOT_GAUGE_SUBPROCESS";
+        if std::env::var_os(SUBPROCESS_ENV).is_none() {
+            let test_name =
+                "session::tests::guest_execution_slots_are_tracked_and_warn_near_capacity";
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("current test binary"))
+                    .arg(test_name)
+                    .arg("--exact")
+                    .arg("--nocapture")
+                    .env(SUBPROCESS_ENV, "1")
+                    .output()
+                    .unwrap_or_else(|error| panic!("spawn isolated test {test_name}: {error}"));
+            assert!(
+                output.status.success(),
+                "isolated test {test_name} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let warning_sink = Arc::clone(&warnings);
+        agentos_bridge::queue_tracker::set_limit_warning_handler(Box::new(move |warning| {
+            if warning.name == TrackedLimit::GuestExecutions {
+                warning_sink
+                    .lock()
+                    .expect("warning sink mutex")
+                    .push(warning.clone());
+            }
+        }));
+
+        let control = Arc::new(SlotControlState::new(5));
+        let metrics = RuntimeMetrics::new();
+        let mut permits = Vec::new();
+        for active in 1..=5 {
+            permits.push(
+                SessionSlotPermit::try_acquire(&control, 5, metrics.clone())
+                    .expect("acquire guest execution slot"),
+            );
+            assert_eq!(control.gauge.depth(), active);
+        }
+
+        assert_eq!(control.gauge.depth(), 5);
+        assert_eq!(control.gauge.high_water(), 5);
+        assert_eq!(control.gauge.capacity(), 5);
+        assert!(agentos_bridge::queue_tracker::queue_snapshot()
+            .iter()
+            .any(|stat| {
+                stat.name == TrackedLimit::GuestExecutions
+                    && stat.depth == 5
+                    && stat.high_water == 5
+                    && stat.capacity == 5
+            }));
+        let warnings = warnings.lock().expect("warning sink mutex");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].observed, 4);
+        assert_eq!(warnings[0].capacity, 5);
+        drop(warnings);
+
+        let rejection = SessionSlotPermit::try_acquire(&control, 5, metrics)
+            .err()
+            .expect("hard guest execution limit must reject");
+        assert!(rejection.contains("ERR_AGENTOS_VM_EXECUTOR_LIMIT"));
+        assert_eq!(control.gauge.depth(), 5);
+
+        drop(permits);
+        assert_eq!(control.gauge.depth(), 0);
+        assert_eq!(control.gauge.high_water(), 5);
     }
 
     #[test]

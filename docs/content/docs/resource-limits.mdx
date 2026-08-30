@@ -98,6 +98,9 @@ bounded queues are tracked in a central limit registry that:
 - **Warns before the limit is hit.** As usage crosses ~80% of a cap, the runtime
   emits a structured warning (once per crossing, re-armed only after it recovers),
   so a slow consumer or a runaway guest is visible *before* it fails.
+- **Tracks process-wide guest execution admission.** The `guest_executions`
+  resource gauge reports the active count, high-water mark, and configured
+  capacity for the bounded V8 executor slots.
 - **Never drops data silently.** Internal queues either apply backpressure or
   fail with a typed error naming the exhausted limit and the setting used to
   raise it. A rejected event is not popped and forgotten.
