@@ -241,6 +241,25 @@ fn collect_process_events(
     }
 }
 
+fn collect_execution_completed(
+    stdout: &mut ChildStdout,
+    codec: &WireFrameCodec,
+    execution_id: &str,
+) -> ExecutionCompletedEvent {
+    loop {
+        match read_frame(stdout, codec) {
+            ProtocolFrame::EventFrame(event) => {
+                if let EventPayload::ExecutionCompletedEvent(completed) = event.payload {
+                    if completed.execution_id == execution_id {
+                        return completed;
+                    }
+                }
+            }
+            other => panic!("unexpected frame while waiting for execution completion: {other:?}"),
+        }
+    }
+}
+
 fn collect_vm_lifecycle_states(
     stdout: &mut ChildStdout,
     codec: &WireFrameCodec,
@@ -803,12 +822,71 @@ fn native_sidecar_binary_runs_the_framed_protocol_over_stdio() {
         wire_request(
             15,
             wire_vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::JavaScriptExecutionRequest(JavaScriptExecutionRequest {
+                process: ProcessExecutionOptions {
+                    identity: ExecutionIdentityOptions { context_id: None },
+                    output: ExecutionOutputOptions {
+                        capture: Some(ExecutionOutputCapture::All),
+                        retain_events: Some(false),
+                    },
+                    operation_id: None,
+                    background: Some(false),
+                    cwd: None,
+                    env: Some(HashMap::new()),
+                    args: Vec::new(),
+                    stdin: None,
+                    timeout_ms: Some(10_000),
+                    pty: None,
+                },
+                source: String::from("console.log(6 * 7)"),
+                format: Some(JavaScriptModuleFormat::Module),
+                file_path: None,
+                inputs: None,
+            }),
+        ),
+    );
+    let accepted = recv_response(&mut control, &codec, 15, &mut buffered_events);
+    let execution_id = match accepted.payload {
+        ResponsePayload::ExecutionAcceptedResponse(response) => response.operation_id,
+        other => panic!("unexpected language execution response: {other:?}"),
+    };
+    let completed = collect_execution_completed(&mut stdout, &codec, &execution_id);
+    assert_eq!(completed.outcome, ExecutionOutcome::Succeeded);
+    assert_eq!(completed.exit_code, Some(0));
+
+    send_request(
+        &mut stdin,
+        &codec,
+        wire_request(
+            16,
+            wire_vm(&connection_id, &session_id, &vm_id),
+            RequestPayload::WaitExecutionRequest(WaitExecutionRequest {
+                execution_id: execution_id.clone(),
+            }),
+        ),
+    );
+    let completed_result = recv_response(&mut control, &codec, 16, &mut buffered_events);
+    match completed_result.payload {
+        ResponsePayload::ExecutionCompletedResponse(response) => {
+            assert_eq!(response.outcome, ExecutionOutcome::Succeeded);
+            assert_eq!(response.exit_code, Some(0));
+            assert_eq!(response.stdout.as_deref(), Some(b"42\n".as_slice()));
+        }
+        other => panic!("unexpected wait-execution response: {other:?}"),
+    }
+
+    send_request(
+        &mut stdin,
+        &codec,
+        wire_request(
+            17,
+            wire_vm(&connection_id, &session_id, &vm_id),
             RequestPayload::DisposeVmRequest(DisposeVmRequest {
                 reason: DisposeReason::Requested,
             }),
         ),
     );
-    let disposed = recv_response(&mut control, &codec, 15, &mut buffered_events);
+    let disposed = recv_response(&mut control, &codec, 17, &mut buffered_events);
     match disposed.payload {
         ResponsePayload::VmDisposedResponse(response) => assert_eq!(response.vm_id, vm_id),
         other => panic!("unexpected dispose response: {other:?}"),

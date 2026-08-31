@@ -2475,11 +2475,15 @@ async fn run_protocol_engine(engine: ProtocolEngine) -> Result<(), Box<dyn Error
                         "ERR_AGENTOS_EVENT_PUMP"
                     );
                     if let Some(frame) = frame {
-                        debug_assert!(schedule_durable_event_frame(
+                        let scheduled = schedule_durable_event_frame(
                             &frame_writer,
                             &mut ordinary_event_tasks,
                             frame,
-                        ));
+                        );
+                        debug_assert!(
+                            scheduled,
+                            "event output task must be empty while the event-ready branch is enabled"
+                        );
                         break;
                     }
                 }
