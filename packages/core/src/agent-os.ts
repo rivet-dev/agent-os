@@ -3582,21 +3582,12 @@ export class AgentOs {
 		}
 		completed = completedBeforeAdmission.has(executionId);
 		if (completed) resolveCompletion?.();
-		let rejectAbort: ((reason?: unknown) => void) | undefined;
-		const aborted =
-			!background && options.signal
-				? new Promise<never>((_resolve, reject) => {
-						rejectAbort = reject;
-					})
-				: undefined;
 		const abort = () => {
+			// Admitted executions report cancellation through their structured result.
 			void this._cancelExecution(response.response.operationId).catch(
 				(error) => {
 					console.error("[agentos] failed to cancel aborted execution", error);
 				},
-			);
-			rejectAbort?.(
-				options.signal?.reason ?? new DOMException("Aborted", "AbortError"),
 			);
 		};
 		options.signal?.addEventListener("abort", abort, { once: true });
@@ -3633,7 +3624,7 @@ export class AgentOs {
 			};
 		}
 		try {
-			await (aborted ? Promise.race([completion, aborted]) : completion);
+			await completion;
 			return await this._waitExecutionResult(response.response.operationId);
 		} finally {
 			cleanup();
