@@ -6,8 +6,8 @@ const client = createClient<typeof registry>({
 });
 const agent = client.vm.getOrCreate("my-agent");
 
-// ── Quick start ───────────────────────────────────────────────────
-// docs:start quick-start
+// ── Quickstart ────────────────────────────────────────────────────
+// docs:start quickstart
 async function quickStart() {
 	await agent.sessions.open({
 		agent: "pi",
@@ -21,7 +21,7 @@ async function quickStart() {
 	});
 	console.log(result.message?.content ?? []);
 }
-// docs:end quick-start
+// docs:end quickstart
 
 // ── Skills ────────────────────────────────────────────────────────
 //

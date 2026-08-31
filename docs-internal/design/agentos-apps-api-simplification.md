@@ -792,12 +792,12 @@ paths, and retain the previous valid release during failed iterations.
 - [x] Add the AI SDK generate, type-check, repair, and deploy example.
 - [x] Rewrite the package README around the target API.
 - [x] Rewrite the website Apps page in this order: product overview, checked
-      Hello World quick start, application structure, deployment, builds and
+      Hello World quickstart, application structure, deployment, builds and
       dependencies, HTTP routing, SQLite and RivetKit persistence, scaling and
       cold starts, regions and isolation, examples, API reference, and current
       limitations.
 - [x] Lead the website page with the deployable user API; keep scaler,
-      namespace, artifact, and runner internals after the quick start.
+      namespace, artifact, and runner internals after the quickstart.
 - [x] Source every runnable website snippet from the checked flat examples
       through the docs theme `<CodeSnippet>` mechanism.
 - [x] Include the deployment defaults table, build pipeline, disposable-replica

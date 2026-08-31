@@ -1,11 +1,11 @@
 ---
 title: "Pi Agent"
-description: "Run the Pi coding agent in a session, including quick start and session management."
+description: "Run the Pi coding agent in a session, including quickstart and session management."
 category: "Agents"
 order: 1
 ---
 
-Spin up the Pi coding agent inside a VM, open a session, and send it prompts. Reach for this when you want an end-to-end agent loop — quick start plus the session knobs for skills and MCP servers.
+Spin up the Pi coding agent inside a VM, open a session, and send it prompts. Reach for this when you want an end-to-end agent loop from quickstart through the session knobs for skills and MCP servers.
 
 ## How it works
 
