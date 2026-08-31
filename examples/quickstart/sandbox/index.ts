@@ -39,10 +39,10 @@ try {
 	const runCommandResult = await vm.process.exec(
 		"agentos-sandbox run-command --command echo --args 'hello from Docker sandbox'",
 	);
-	console.log("Sandbox command:", runCommandResult.stdout.trim());
+	console.log("Sandbox command:", (runCommandResult.stdout ?? "").trim());
 
 	const processList = await vm.process.exec("agentos-sandbox list-processes");
-	console.log("Sandbox processes:", processList.stdout.trim());
+	console.log("Sandbox processes:", (processList.stdout ?? "").trim());
 
 	const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 	if (ANTHROPIC_API_KEY) {

@@ -36,7 +36,7 @@ pub(crate) fn decode_unwritten_extents(
         ));
     }
     let mut ranges = Vec::with_capacity(encoded.len() / 16);
-    for chunk in encoded.chunks_exact(16) {
+    for chunk in encoded.as_chunks::<16>().0 {
         let start = u64::from_le_bytes(chunk[..8].try_into().expect("eight-byte extent start"));
         let end = u64::from_le_bytes(chunk[8..].try_into().expect("eight-byte extent end"));
         if start >= end

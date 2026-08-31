@@ -143,7 +143,11 @@ function normalizeHeaders(
 	}
 
 	if (headers instanceof Headers) {
-		return Object.fromEntries(headers.entries());
+		const normalized: Record<string, string> = {};
+		headers.forEach((value, name) => {
+			normalized[name] = value;
+		});
+		return normalized;
 	}
 
 	if (Array.isArray(headers)) {

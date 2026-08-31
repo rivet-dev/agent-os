@@ -1,3 +1,5 @@
+/// <reference path="../long-timeout.d.ts" />
+
 import type { LongTimeout } from "long-timeout";
 import {
 	clearTimeout as clearLongTimeout,
