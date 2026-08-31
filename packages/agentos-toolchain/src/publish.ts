@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { verifyAospkgCommands } from "./aospkg.js";
+import { declaredCommandNames, readManifest } from "./manifest.js";
 
 export interface PublishOptions {
 	packageDir: string;
@@ -24,7 +26,9 @@ export interface PublishResult {
  * tag must keep resolving a deliberate release, never whatever was published
  * last from a dev machine or CI branch.
  */
-export function resolveTag(options: Pick<PublishOptions, "tag" | "latest">): string {
+export function resolveTag(
+	options: Pick<PublishOptions, "tag" | "latest">,
+): string {
 	if (options.latest) {
 		if (options.tag !== undefined && options.tag !== "latest") {
 			throw new Error(
@@ -35,7 +39,7 @@ export function resolveTag(options: Pick<PublishOptions, "tag" | "latest">): str
 	}
 	if (options.tag === "latest") {
 		throw new Error(
-			'refusing implicit `--tag latest` — pass --latest to move the latest pointer',
+			"refusing implicit `--tag latest` — pass --latest to move the latest pointer",
 		);
 	}
 	return options.tag ?? "dev";
@@ -92,6 +96,22 @@ export function publish(options: PublishOptions): PublishResult {
 			`${pkg.name} is not built (no dist/index.js in ${packageDir}) — build it first`,
 		);
 	}
+	const declaredCommands = declaredCommandNames(readManifest(packageDir));
+	if (declaredCommands.length > 0) {
+		const packagePath = join(packageDir, "dist", "package.aospkg");
+		if (!existsSync(packagePath)) {
+			throw new Error(
+				`${pkg.name} declares commands but has no built dist/package.aospkg`,
+			);
+		}
+		try {
+			verifyAospkgCommands(readFileSync(packagePath), declaredCommands);
+		} catch (error) {
+			throw new Error(
+				`refusing to publish invalid command artifact for ${pkg.name}: ${String(error)}`,
+			);
+		}
+	}
 
 	const inPnpmWorkspace =
 		findUp(packageDir, "pnpm-workspace.yaml") !== undefined;
@@ -106,7 +126,9 @@ export function publish(options: PublishOptions): PublishResult {
 	const result = spawnSync(pm, args, { cwd: packageDir, stdio: "inherit" });
 	if (result.error) throw result.error;
 	if (result.status !== 0) {
-		throw new Error(`${pm} publish failed for ${pkg.name} (exit ${result.status})`);
+		throw new Error(
+			`${pm} publish failed for ${pkg.name} (exit ${result.status})`,
+		);
 	}
 	return { name: pkg.name, version: pkg.version, tag };
 }

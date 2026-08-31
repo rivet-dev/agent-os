@@ -16,16 +16,17 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import {
+	type AgentBlock,
+	type CommandTarget,
+	decodeMountIndex,
 	decodePackageManifest,
 	encodeMountIndex,
 	encodePackageManifest,
-	TarEntryKind,
-	type AgentBlock,
-	type CommandTarget,
 	type ManPage,
 	type PackageManifest,
 	type ProvidesBlock,
 	type TarEntry,
+	TarEntryKind,
 } from "./generated-package-format.js";
 
 const AOSPKG_MAGIC = Uint8Array.from([0x89, 0x41, 0x4f, 0x53]); // 0x89 'A' 'O' 'S'
@@ -53,24 +54,119 @@ export interface AospkgSummary {
 
 export type DecodedAospkgManifest = PackageManifest;
 
-/** Decode the chunk1 manifest from a package container. */
-export function decodeAospkgManifest(source: Uint8Array): DecodedAospkgManifest {
-	const bytes = Buffer.from(source.buffer, source.byteOffset, source.byteLength);
-	if (bytes.length < 16 || !bytes.subarray(0, 4).equals(Buffer.from(AOSPKG_MAGIC))) {
+function aospkgManifestChunk(source: Uint8Array): {
+	bytes: Buffer;
+	manifestEnd: number;
+	manifestPayload: Buffer;
+} {
+	const bytes = Buffer.from(
+		source.buffer,
+		source.byteOffset,
+		source.byteLength,
+	);
+	if (
+		bytes.length < 16 ||
+		!bytes.subarray(0, 4).equals(Buffer.from(AOSPKG_MAGIC))
+	) {
 		throw new Error("invalid .aospkg header");
 	}
 	if (bytes.readUInt16LE(4) !== AOSPKG_FORMAT_VERSION) {
-		throw new Error(`unsupported .aospkg format version: ${bytes.readUInt16LE(4)}`);
+		throw new Error(
+			`unsupported .aospkg format version: ${bytes.readUInt16LE(4)}`,
+		);
 	}
 	const manifestLength = bytes.readUInt32LE(8);
-	const manifestEnd = 16 + manifestLength;
+	const manifestStart = 16;
+	const manifestEnd = manifestStart + manifestLength;
 	if (manifestLength < 2 || manifestEnd > bytes.length) {
 		throw new Error("invalid .aospkg manifest range");
 	}
-	const version = bytes.readUInt16LE(16);
-	const payload = bytes.subarray(18, manifestEnd);
-	if (version === PACKAGE_MANIFEST_VERSION) return decodePackageManifest(payload);
-	throw new Error(`unsupported package manifest version: ${version}`);
+	if (bytes.readUInt16LE(manifestStart) !== PACKAGE_MANIFEST_VERSION) {
+		throw new Error(
+			`unsupported package manifest version: ${bytes.readUInt16LE(manifestStart)}`,
+		);
+	}
+	return {
+		bytes,
+		manifestEnd,
+		manifestPayload: bytes.subarray(manifestStart + 2, manifestEnd),
+	};
+}
+
+function aospkgChunks(source: Uint8Array): {
+	manifestPayload: Buffer;
+	indexPayload: Buffer;
+} {
+	const { bytes, manifestEnd, manifestPayload } = aospkgManifestChunk(source);
+	const indexLength = bytes.readUInt32LE(12);
+	const indexEnd = manifestEnd + indexLength;
+	if (indexLength < 2 || indexEnd > bytes.length) {
+		throw new Error("invalid .aospkg mount index range");
+	}
+	if (bytes.readUInt16LE(manifestEnd) !== PACKAGE_MANIFEST_VERSION) {
+		throw new Error(
+			`unsupported mount index version: ${bytes.readUInt16LE(manifestEnd)}`,
+		);
+	}
+	return {
+		manifestPayload,
+		indexPayload: bytes.subarray(manifestEnd + 2, indexEnd),
+	};
+}
+
+/** Decode the chunk1 manifest from a package container. */
+export function decodeAospkgManifest(
+	source: Uint8Array,
+): DecodedAospkgManifest {
+	return decodePackageManifest(aospkgManifestChunk(source).manifestPayload);
+}
+
+/**
+ * Assert that a packed command package contains its complete declared command
+ * surface and that every projected target carries an executable mode bit.
+ */
+export function verifyAospkgCommands(
+	source: Uint8Array,
+	expectedCommands: readonly string[],
+): DecodedAospkgManifest {
+	const chunks = aospkgChunks(source);
+	const manifest = decodePackageManifest(chunks.manifestPayload);
+	const expected = [...expectedCommands].sort(byteCompare);
+	const actual = manifest.commands
+		.map((target) => target.command)
+		.sort(byteCompare);
+	if (
+		expected.length !== actual.length ||
+		expected.some((command, index) => command !== actual[index])
+	) {
+		throw new Error(
+			`packed command set does not match declarations: expected=${expected.join(",")} ` +
+				`actual=${actual.join(",")}`,
+		);
+	}
+
+	const entries = new Map(
+		decodeMountIndex(chunks.indexPayload).tarEntries.map((entry) => [
+			entry.path,
+			entry,
+		]),
+	);
+	for (const target of manifest.commands) {
+		const path = `/${target.entry.replace(/^\/+/, "")}`;
+		const entry = entries.get(path);
+		if (entry === undefined) {
+			throw new Error(
+				`packed command ${target.command} targets missing entry ${path}`,
+			);
+		}
+		if (entry.kind === TarEntryKind.Directory || (entry.mode & 0o111) === 0) {
+			throw new Error(
+				`packed command ${target.command} targets non-executable entry ${path} ` +
+					`(mode ${(entry.mode & 0o7777).toString(8)})`,
+			);
+		}
+	}
+	return manifest;
 }
 
 interface SourceManifestJson {
@@ -106,7 +202,10 @@ interface RawTarMember {
 
 /** Pack `sourceTar` into a `.aospkg` at `dest`. The source
  * `agentos-package.json` must carry `name` and `version`. */
-export function packAospkgFromTar(sourceTar: string, dest: string): AospkgSummary {
+export function packAospkgFromTar(
+	sourceTar: string,
+	dest: string,
+): AospkgSummary {
 	const source = readFileSync(sourceTar);
 	const { bytes, summary } = packAospkgFromTarBytes(source);
 	writeFileSync(dest, bytes);
@@ -288,7 +387,11 @@ function indexEntry(member: RawTarMember): TarEntry | undefined {
 			linkTarget: member.linkTarget,
 		};
 	}
-	if (member.typeflag === "0" || member.typeflag === "\0" || member.typeflag === "7") {
+	if (
+		member.typeflag === "0" ||
+		member.typeflag === "\0" ||
+		member.typeflag === "7"
+	) {
 		return {
 			...base,
 			kind: TarEntryKind.File,
@@ -387,7 +490,10 @@ function manPagesFromIndex(sortedPaths: string[]): ManPage[] {
 			if (parts.length !== 2) return [];
 			return [{ section: parts[0], page: parts[1] }];
 		})
-		.sort((a, b) => byteCompare(a.section, b.section) || byteCompare(a.page, b.page));
+		.sort(
+			(a, b) =>
+				byteCompare(a.section, b.section) || byteCompare(a.page, b.page),
+		);
 }
 
 function isProjectableCommandName(name: string): boolean {

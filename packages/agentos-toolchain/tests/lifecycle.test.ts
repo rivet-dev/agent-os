@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { build } from "../src/build.js";
-import { resolveTag } from "../src/publish.js";
+import { publish, resolveTag } from "../src/publish.js";
 import { stage } from "../src/stage.js";
 
 const dirs: string[] = [];
@@ -61,8 +61,12 @@ describe("stage", () => {
 			["bash", "cat", "df", "id", "linked-sh", "more", "sh"].sort(),
 		);
 		// Symlink sources are dereferenced into real files.
-		expect(lstatSync(join(pkg, "bin", "linked-sh")).isSymbolicLink()).toBe(false);
-		expect(readFileSync(join(pkg, "bin", "linked-sh"), "utf8")).toBe("\0asm-sh");
+		expect(lstatSync(join(pkg, "bin", "linked-sh")).isSymbolicLink()).toBe(
+			false,
+		);
+		expect(readFileSync(join(pkg, "bin", "linked-sh"), "utf8")).toBe(
+			"\0asm-sh",
+		);
 		expect(readFileSync(join(pkg, "bin", "bash"), "utf8")).toBe("\0asm-sh");
 		expect(readFileSync(join(pkg, "bin", "id"), "utf8")).toBe("\0asm-stubs");
 		for (const command of result.staged) {
@@ -97,6 +101,8 @@ describe("stage", () => {
 
 	test("missing commands dir with if-missing=skip leaves a placeholder", () => {
 		const pkg = makePackageDir({ commands: ["sh"] });
+		mkdirSync(join(pkg, "bin"));
+		writeFileSync(join(pkg, "bin", "stale"), "old");
 		const result = stage({
 			packageDir: pkg,
 			commandsDir: join(pkg, "does-not-exist"),
@@ -145,9 +151,9 @@ describe("build", () => {
 		);
 		// Staging fields are build-time only — they must not ship at runtime.
 		expect(runtimeManifest).toEqual({ name: "fake", version: "1.2.3" });
-		expect(readFileSync(join(pkg, "dist", "package", "bin", "bash"), "utf8")).toBe(
-			"\0asm-sh",
-		);
+		expect(
+			readFileSync(join(pkg, "dist", "package", "bin", "bash"), "utf8"),
+		).toBe("\0asm-sh");
 		for (const command of result.commands) {
 			expect(
 				statSync(join(pkg, "dist", "package", "bin", command)).mode & 0o777,
@@ -162,6 +168,15 @@ describe("build", () => {
 		expect(existsSync(result.outTar)).toBe(true);
 		expect(existsSync(join(pkg, "dist", "package", "bin"))).toBe(false);
 	});
+
+	test("refuses to assemble a partially staged command package", () => {
+		const commandsDir = makeCommandsDir();
+		const pkg = makePackageDir({ commands: ["sh", "missing"] });
+		stage({ packageDir: pkg, commandsDir, ifMissing: "skip" });
+		expect(() => build(pkg)).toThrow(
+			/refusing partial command package.*declared=missing,sh staged=sh/,
+		);
+	});
 });
 
 describe("resolveTag", () => {
@@ -173,5 +188,31 @@ describe("resolveTag", () => {
 		expect(resolveTag({ latest: true })).toBe("latest");
 		expect(() => resolveTag({ tag: "latest" })).toThrow(/--latest/);
 		expect(() => resolveTag({ latest: true, tag: "dev" })).toThrow(/conflicts/);
+	});
+});
+
+describe("publish", () => {
+	test("refuses a command package without a packed runtime artifact", () => {
+		const pkg = makePackageDir({ commands: ["sh"] });
+		mkdirSync(join(pkg, "dist"));
+		writeFileSync(join(pkg, "dist", "index.js"), "export default {};\n");
+		expect(() => publish({ packageDir: pkg, dryRun: true })).toThrow(
+			/declares commands but has no built dist\/package\.aospkg/,
+		);
+	});
+
+	test("refuses a packed artifact missing a newly declared command", () => {
+		const commandsDir = makeCommandsDir();
+		const pkg = makePackageDir({ commands: ["sh"] });
+		stage({ packageDir: pkg, commandsDir });
+		build(pkg);
+		writeFileSync(join(pkg, "dist", "index.js"), "export default {};\n");
+		writeFileSync(
+			join(pkg, "agentos-package.json"),
+			JSON.stringify({ commands: ["sh", "cat"] }),
+		);
+		expect(() => publish({ packageDir: pkg, dryRun: true })).toThrow(
+			/expected=cat,sh actual=sh/,
+		);
 	});
 });

@@ -45,6 +45,7 @@ export function stage(options: StageOptions): StageResult {
 	const commands = manifest?.commands ?? [];
 	const aliases = manifest?.aliases ?? {};
 	const stubs = manifest?.stubs ?? [];
+	const binDir = join(packageDir, "bin");
 	if (
 		commands.length === 0 &&
 		stubs.length === 0 &&
@@ -58,15 +59,18 @@ export function stage(options: StageOptions): StageResult {
 
 	if (!existsSync(commandsDir)) {
 		if (ifMissing === "skip") {
+			rmSync(binDir, { recursive: true, force: true });
 			process.stdout.write(
 				`stage: commands dir not found (${commandsDir}) — leaving bin/ unstaged (placeholder package)\n`,
 			);
-			return { staged: [], missing: [...commands, ...stubs, ...Object.keys(aliases)] };
+			return {
+				staged: [],
+				missing: [...commands, ...stubs, ...Object.keys(aliases)],
+			};
 		}
 		throw new Error(`stage: commands dir not found: ${commandsDir}`);
 	}
 
-	const binDir = join(packageDir, "bin");
 	rmSync(binDir, { recursive: true, force: true });
 	mkdirSync(binDir, { recursive: true });
 
@@ -116,8 +120,6 @@ export function stage(options: StageOptions): StageResult {
 		}
 		process.stdout.write(`stage: WARN ${detail}\n`);
 	}
-	process.stdout.write(
-		`staged ${staged.length} command(s) into ${binDir}\n`,
-	);
+	process.stdout.write(`staged ${staged.length} command(s) into ${binDir}\n`);
 	return { staged, missing };
 }
