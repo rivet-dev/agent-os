@@ -151,7 +151,14 @@ fi
 mkdir -p "$(dirname "$OUTPUT")"
 if command -v wasm-opt >/dev/null 2>&1; then
   echo "Optimizing GNU grep WASM binary..."
-  wasm-opt -O3 --strip-debug --all-features "$BIN" -o "$OUTPUT"
+  if wasm-opt --help 2>&1 | grep -q -- '--disable-compact-imports'; then
+    # New Binaryen's --all-features enables compact imports, which Node/V8 does not implement.
+    wasm-opt -O3 --strip-debug --all-features --disable-compact-imports "$BIN" -o "$OUTPUT"
+  else
+    # Older Binaryen does not know the compact-imports disable flag. Do not enable every proposal:
+    # doing so could emit compact imports with no way to lower them again.
+    wasm-opt -O3 --strip-debug "$BIN" -o "$OUTPUT"
+  fi
 else
   cp "$BIN" "$OUTPUT"
 fi
