@@ -1062,12 +1062,15 @@ impl SessionSlotPermit {
         metrics: RuntimeMetrics,
     ) -> Result<Self, String> {
         let (lock, _) = &**control;
-        let mut active = lock
-            .lock()
-            .map_err(|_| String::from("ERR_AGENTOS_VM_EXECUTOR_POISONED: slot lock poisoned"))?;
+        let mut active = lock.lock().map_err(|_| {
+            String::from("ERR_AGENTOS_GUEST_EXECUTION_POISONED: slot lock poisoned")
+        })?;
         if *active >= maximum {
             return Err(format!(
-                "ERR_AGENTOS_VM_EXECUTOR_LIMIT: active V8 executors reached limit of {maximum}; raise runtime.executor.maxActiveVms"
+                "ERR_AGENTOS_GUEST_EXECUTION_LIMIT: concurrently running guest executions reached the process limit of {maximum}; \
+every live guest process (JavaScript, TypeScript, Python, or WASM command) holds one slot for its whole lifetime, \
+so a parent and the child it waits on need two. Raise runtime.executor.maxActiveGuestExecutions by setting {} on the sidecar process.",
+                agentos_runtime::MAX_ACTIVE_GUEST_EXECUTIONS_ENV
             ));
         }
         *active += 1;
@@ -1090,10 +1093,12 @@ impl Drop for SessionSlotPermit {
                 cvar.notify_all();
             }
             Ok(_) => eprintln!(
-                "ERR_AGENTOS_VM_EXECUTOR_ACCOUNTING_UNDERFLOW: executor permit released at zero"
+                "ERR_AGENTOS_GUEST_EXECUTION_ACCOUNTING_UNDERFLOW: executor permit released at zero"
             ),
             Err(_) => {
-                eprintln!("ERR_AGENTOS_VM_EXECUTOR_POISONED: executor permit could not be released")
+                eprintln!(
+                    "ERR_AGENTOS_GUEST_EXECUTION_POISONED: executor permit could not be released"
+                )
             }
         }
     }
@@ -4005,7 +4010,7 @@ mod tests {
             return;
         }
         let mut config = agentos_runtime::RuntimeConfig {
-            max_active_vm_executors: 3,
+            max_active_guest_executions: 3,
             vm_executor_teardown_timeout_ms: 23,
             ..agentos_runtime::RuntimeConfig::default()
         };
@@ -4016,7 +4021,7 @@ mod tests {
         let (event_tx, _event_rx) = crossbeam_channel::unbounded();
         let router: CallIdRouter = Arc::new(BridgeCallRegistry::with_default_limit());
         let mut manager = SessionManager::new(
-            runtime.max_active_vm_executors(),
+            runtime.max_active_guest_executions(),
             event_tx,
             router,
             Arc::new(SnapshotCache::new(1)),
@@ -4169,7 +4174,12 @@ mod tests {
             let error = mgr
                 .create_session("s3".into(), None, None, None)
                 .expect_err("third executor must be rejected before thread creation");
-            assert!(error.contains("ERR_AGENTOS_VM_EXECUTOR_LIMIT"));
+            assert!(error.contains("ERR_AGENTOS_GUEST_EXECUTION_LIMIT"));
+            // The limit error must name a knob an operator can actually set.
+            assert!(
+                error.contains(agentos_runtime::MAX_ACTIVE_GUEST_EXECUTIONS_ENV),
+                "limit error must say how to raise it: {error}"
+            );
 
             // Allow threads to acquire slots
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -4251,7 +4261,7 @@ mod tests {
         let error = mgr
             .create_session("two-phase".into(), None, None, None)
             .expect_err("old generation must retain its executor permit");
-        assert!(error.contains("ERR_AGENTOS_VM_EXECUTOR_LIMIT"));
+        assert!(error.contains("ERR_AGENTOS_GUEST_EXECUTION_LIMIT"));
         first_shutdown.finish();
 
         mgr.create_session("two-phase".into(), None, None, None)

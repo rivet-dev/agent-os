@@ -489,7 +489,7 @@ fn assert_overload_rejects_before_thread_and_recovers_after_release() -> io::Res
     assert!(
         overload
             .to_string()
-            .contains("ERR_AGENTOS_VM_EXECUTOR_LIMIT"),
+            .contains("ERR_AGENTOS_GUEST_EXECUTION_LIMIT"),
         "unexpected executor overload error: {overload}"
     );
     runtime.unregister_session(&session_b);
@@ -592,7 +592,7 @@ fn assert_shared_runtime_handles_share_concurrency_quota() -> io::Result<()> {
     assert!(
         overload
             .to_string()
-            .contains("ERR_AGENTOS_VM_EXECUTOR_LIMIT"),
+            .contains("ERR_AGENTOS_GUEST_EXECUTION_LIMIT"),
         "unexpected shared executor overload error: {overload}"
     );
     clients[3].unregister_session(&session_ids[3]);

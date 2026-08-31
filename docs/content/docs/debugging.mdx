@@ -32,6 +32,27 @@ const agentOs = await AgentOs.create({
 
 The durable session and committed SQLite history remain available. The crash *reason* is on the adapter's stderr; the exit event reports that the live runtime disappeared. A later explicit prompt performs restoration. See [Sessions](/agentos/docs/sessions).
 
+## Guest executions fail to start
+
+```text
+failed to start guest JavaScript runtime: ERR_AGENTOS_GUEST_EXECUTION_LIMIT:
+concurrently running guest executions reached the process limit of 64
+```
+
+The sidecar admits a bounded number of concurrently running guest processes
+across **all** the VMs it hosts, and every live guest process holds one slot for
+its whole lifetime. Fleets of parallel agents hit this well before they exhaust
+any per-VM cap.
+
+Raise it on the host process rather than running more agentOS hosts:
+
+```bash
+AGENTOS_MAX_ACTIVE_GUEST_EXECUTIONS=128 node app.mjs
+```
+
+See [Process-wide guest-execution cap](/agentos/docs/resource-limits#process-wide-guest-execution-cap)
+for how to size it.
+
 ## Runtime logs (sidecar)
 
 The agentOS sidecar emits structured **logfmt** logs for request handling, networking, and lifecycle. Configure them with environment variables on the **host process** (the sidecar inherits the host environment):

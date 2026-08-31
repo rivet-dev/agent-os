@@ -747,10 +747,22 @@ fn run_with_optional_control(
     extensions: Vec<Box<dyn Extension>>,
     control_fd: Option<OwnedFd>,
 ) -> Result<(), Box<dyn Error>> {
-    let config = NativeSidecarConfig {
+    let mut config = NativeSidecarConfig {
         compile_cache_root: Some(default_compile_cache_root()),
         ..NativeSidecarConfig::default()
     };
+    // Operator overrides must land before `SidecarRuntime::process` fixes the
+    // process topology: the first caller's config is the one the whole process
+    // keeps, and a later differing config is a typed error, not a re-configure.
+    config.runtime.apply_env_overrides()?;
+    // The admitted ceiling is fixed for the life of the process and shared by
+    // every VM it hosts, so make the effective value observable at startup
+    // rather than only when an execution is rejected for exceeding it.
+    tracing::info!(
+        max_active_guest_executions = config.runtime.max_active_guest_executions,
+        env = agentos_runtime::MAX_ACTIVE_GUEST_EXECUTIONS_ENV,
+        "guest execution admission ceiling"
+    );
     let runtime = agentos_runtime::SidecarRuntime::process(&config.runtime)?;
     let runtime_context = runtime.context();
     // Initialize the embedded V8 runtime + platform now, on the long-lived main

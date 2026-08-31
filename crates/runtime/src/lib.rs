@@ -69,6 +69,38 @@ const DEFAULT_MAX_PROCESS_HTTP2_EVENT_BYTES: usize = 512 * 1024 * 1024;
 const DEFAULT_TASK_POLL_WATCHDOG_MS: u64 = 100;
 const DEFAULT_MAX_TERMINAL_TASK_REPORTS: usize = 4_096;
 const DEFAULT_VM_EXECUTOR_TEARDOWN_TIMEOUT_MS: u64 = 5_000;
+
+/// Process-wide ceiling on concurrently running guest executions.
+///
+/// Each admitted execution owns one OS thread and one V8 isolate (thread-affine,
+/// so it can never be multiplexed onto a shared pool) capped at
+/// `DEFAULT_HEAP_LIMIT_MB`. The binding constraint is therefore threads and
+/// memory, NOT CPU: an agent parked on a network read, or a shell blocked in
+/// `waitpid`, burns no CPU and still holds its slot for the whole life of the
+/// guest process. Deriving this from `available_parallelism()` made the ceiling
+/// depend on the host's core count and silently rejected ordinary workloads —
+/// a shell plus the command it waits on already needs two slots.
+///
+/// A fixed default keeps the admitted concurrency identical on every host.
+/// Raise it with `AGENTOS_MAX_ACTIVE_GUEST_EXECUTIONS`.
+pub const DEFAULT_MAX_ACTIVE_GUEST_EXECUTIONS: usize = 64;
+
+/// Hard ceiling for `AGENTOS_MAX_ACTIVE_GUEST_EXECUTIONS`.
+///
+/// Admission stays bounded regardless of what an operator asks for: at this
+/// ceiling the process still reserves 1024 OS threads and isolates, which is
+/// past the point where a host is thread- and memory-bound. Requests above it
+/// are a typed configuration error, never a silent clamp.
+pub const MAX_ACTIVE_GUEST_EXECUTIONS_CEILING: usize = 1_024;
+
+/// Operator override for [`DEFAULT_MAX_ACTIVE_GUEST_EXECUTIONS`].
+///
+/// Read once, by the process entrypoint, before any VM exists. The value is
+/// process topology (see [`SidecarRuntime::process`]) and is deliberately not a
+/// client wire field: one sidecar process is shared by every VM and connection,
+/// so no single tenant may rewrite it for its neighbours.
+pub const MAX_ACTIVE_GUEST_EXECUTIONS_ENV: &str = "AGENTOS_MAX_ACTIVE_GUEST_EXECUTIONS";
+
 pub const DEFAULT_PROTOCOL_MAX_INGRESS_FRAMES: usize = 128;
 pub const DEFAULT_PROTOCOL_MAX_INGRESS_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_PROTOCOL_MAX_CONTROL_FRAMES: usize = 1_024;
@@ -417,7 +449,10 @@ impl RuntimeResourceConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub worker_threads: usize,
-    pub max_active_vm_executors: usize,
+    /// Process-wide cap on concurrently running guest executions (JavaScript,
+    /// TypeScript, Python, and WASM alike — every live guest process holds one).
+    /// See [`DEFAULT_MAX_ACTIVE_GUEST_EXECUTIONS`].
+    pub max_active_guest_executions: usize,
     pub vm_executor_teardown_timeout_ms: u64,
     pub blocking_worker_threads: usize,
     pub max_blocking_jobs: usize,
@@ -438,7 +473,7 @@ impl Default for RuntimeConfig {
             .unwrap_or(1);
         Self {
             worker_threads: available.clamp(1, 4),
-            max_active_vm_executors: available.max(1),
+            max_active_guest_executions: DEFAULT_MAX_ACTIVE_GUEST_EXECUTIONS,
             vm_executor_teardown_timeout_ms: DEFAULT_VM_EXECUTOR_TEARDOWN_TIMEOUT_MS,
             blocking_worker_threads: available.clamp(1, 4),
             max_blocking_jobs: DEFAULT_MAX_BLOCKING_JOBS,
@@ -455,12 +490,46 @@ impl Default for RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// Apply operator overrides from the process environment.
+    ///
+    /// Call this from the process entrypoint, before [`SidecarRuntime::process`]
+    /// fixes the topology. A present-but-unusable value is a hard, typed error
+    /// naming the variable and its bounds: an operator who asked for a specific
+    /// admission ceiling must never silently get a different one.
+    pub fn apply_env_overrides(&mut self) -> Result<(), RuntimeBuildError> {
+        self.apply_env_overrides_from(|key| std::env::var(key).ok())
+    }
+
+    /// Testable core of [`apply_env_overrides`]. `read` resolves a variable
+    /// name to its value, mirroring `std::env::var(..).ok()`.
+    pub fn apply_env_overrides_from(
+        &mut self,
+        read: impl Fn(&str) -> Option<String>,
+    ) -> Result<(), RuntimeBuildError> {
+        let Some(raw) = read(MAX_ACTIVE_GUEST_EXECUTIONS_ENV) else {
+            return Ok(());
+        };
+        let value = raw.trim();
+        let parsed: usize = value.parse().map_err(|_| {
+            RuntimeBuildError(format!(
+                "ERR_AGENTOS_RUNTIME_CONFIG: {MAX_ACTIVE_GUEST_EXECUTIONS_ENV} must be an integer between 1 and {MAX_ACTIVE_GUEST_EXECUTIONS_CEILING}, got {value:?}"
+            ))
+        })?;
+        if parsed == 0 || parsed > MAX_ACTIVE_GUEST_EXECUTIONS_CEILING {
+            return Err(RuntimeBuildError(format!(
+                "ERR_AGENTOS_RUNTIME_CONFIG: {MAX_ACTIVE_GUEST_EXECUTIONS_ENV} must be between 1 and {MAX_ACTIVE_GUEST_EXECUTIONS_CEILING}, got {parsed}"
+            )));
+        }
+        self.max_active_guest_executions = parsed;
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), RuntimeBuildError> {
         for (field, value) in [
             ("runtime.workerThreads", self.worker_threads),
             (
-                "runtime.executor.maxActiveVms",
-                self.max_active_vm_executors,
+                "runtime.executor.maxActiveGuestExecutions",
+                self.max_active_guest_executions,
             ),
             (
                 "runtime.blocking.workerThreads",
@@ -1114,7 +1183,7 @@ pub struct RuntimeContext {
     fairness: FairWorkBroker,
     terminal_failure: Arc<Mutex<Option<TaskTerminalReport>>>,
     task_poll_watchdog: Duration,
-    max_active_vm_executors: usize,
+    max_active_guest_executions: usize,
     vm_executor_teardown_timeout: Duration,
     blocking_job_timeout: Duration,
     admission_open: Arc<AtomicBool>,
@@ -1145,8 +1214,8 @@ impl RuntimeContext {
         &self.metrics
     }
 
-    pub fn max_active_vm_executors(&self) -> usize {
-        self.max_active_vm_executors
+    pub fn max_active_guest_executions(&self) -> usize {
+        self.max_active_guest_executions
     }
 
     pub fn vm_executor_teardown_timeout(&self) -> Duration {
@@ -1257,7 +1326,7 @@ impl RuntimeContext {
             fairness: self.fairness.clone(),
             terminal_failure: Arc::new(Mutex::new(None)),
             task_poll_watchdog: self.task_poll_watchdog,
-            max_active_vm_executors: self.max_active_vm_executors,
+            max_active_guest_executions: self.max_active_guest_executions,
             vm_executor_teardown_timeout: self.vm_executor_teardown_timeout,
             blocking_job_timeout: self.blocking_job_timeout,
             admission_open,
@@ -1535,7 +1604,7 @@ impl SidecarRuntime {
             fairness,
             terminal_failure: Arc::new(Mutex::new(None)),
             task_poll_watchdog: Duration::from_millis(config.task_poll_watchdog_ms),
-            max_active_vm_executors: config.max_active_vm_executors,
+            max_active_guest_executions: config.max_active_guest_executions,
             vm_executor_teardown_timeout: Duration::from_millis(
                 config.vm_executor_teardown_timeout_ms,
             ),
@@ -1598,6 +1667,78 @@ impl SidecarRuntime {
 mod tests {
     use super::*;
 
+    fn env_override(value: Option<&str>) -> Result<RuntimeConfig, RuntimeBuildError> {
+        let mut config = RuntimeConfig::default();
+        let value = value.map(str::to_owned);
+        config.apply_env_overrides_from(|key| {
+            (key == MAX_ACTIVE_GUEST_EXECUTIONS_ENV)
+                .then(|| value.clone())
+                .flatten()
+        })?;
+        Ok(config)
+    }
+
+    #[test]
+    fn default_guest_execution_ceiling_does_not_depend_on_host_cpu_count() {
+        // A CPU-derived ceiling rejected ordinary workloads on small hosts and
+        // made admitted concurrency differ per machine. Guest executions are
+        // bounded by threads and memory, not by cores.
+        assert_eq!(
+            RuntimeConfig::default().max_active_guest_executions,
+            DEFAULT_MAX_ACTIVE_GUEST_EXECUTIONS
+        );
+        assert!(
+            DEFAULT_MAX_ACTIVE_GUEST_EXECUTIONS >= 2,
+            "a shell and the command it waits on already need two slots"
+        );
+    }
+
+    #[test]
+    fn absent_guest_execution_override_keeps_the_default() {
+        let config = env_override(None).expect("absent override is not an error");
+        assert_eq!(
+            config.max_active_guest_executions,
+            DEFAULT_MAX_ACTIVE_GUEST_EXECUTIONS
+        );
+    }
+
+    #[test]
+    fn guest_execution_override_applies_and_stays_valid() {
+        let config = env_override(Some(" 128 ")).expect("surrounding whitespace is accepted");
+        assert_eq!(config.max_active_guest_executions, 128);
+        config.validate().expect("override must stay valid");
+    }
+
+    #[test]
+    fn unusable_guest_execution_override_is_a_typed_error() {
+        // An operator who asked for a specific ceiling must never silently get a
+        // different one: no clamping, no falling back to the default.
+        for value in ["", "many", "0", "-1", "1.5"] {
+            let error = env_override(Some(value)).expect_err("unusable override must be rejected");
+            assert!(
+                error.to_string().contains(MAX_ACTIVE_GUEST_EXECUTIONS_ENV),
+                "error must name the variable: {error}"
+            );
+        }
+
+        let above_ceiling = MAX_ACTIVE_GUEST_EXECUTIONS_CEILING + 1;
+        let error = env_override(Some(&above_ceiling.to_string()))
+            .expect_err("a request above the hard ceiling must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains(&MAX_ACTIVE_GUEST_EXECUTIONS_CEILING.to_string()),
+            "error must name the ceiling: {error}"
+        );
+
+        let at_ceiling = env_override(Some(&MAX_ACTIVE_GUEST_EXECUTIONS_CEILING.to_string()))
+            .expect("the ceiling itself is admissible");
+        assert_eq!(
+            at_ceiling.max_active_guest_executions,
+            MAX_ACTIVE_GUEST_EXECUTIONS_CEILING
+        );
+    }
+
     #[test]
     fn process_runtime_bounds_every_resource_class_by_default() {
         let runtime = SidecarRuntime::build(RuntimeConfig::default()).expect("build runtime");
@@ -1650,12 +1791,14 @@ mod tests {
             .contains("runtime.tasks.maxTerminalReports"));
 
         let error = RuntimeConfig {
-            max_active_vm_executors: 0,
+            max_active_guest_executions: 0,
             ..RuntimeConfig::default()
         }
         .validate()
-        .expect_err("zero VM executor capacity must be rejected");
-        assert!(error.to_string().contains("runtime.executor.maxActiveVms"));
+        .expect_err("zero guest-execution capacity must be rejected");
+        assert!(error
+            .to_string()
+            .contains("runtime.executor.maxActiveGuestExecutions"));
 
         let error = RuntimeConfig {
             vm_executor_teardown_timeout_ms: 0,
