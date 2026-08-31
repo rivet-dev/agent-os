@@ -690,12 +690,11 @@ where
         payload: VmFetchRequest,
     ) -> OwnedVmRouteFuture {
         let input = self.prepare_owned_vm_route(request);
-        let bridge = self.bridge.clone();
         let max_frame_bytes = self.config.max_frame_bytes;
         Box::pin(async move {
             let input = input?;
             let response_json =
-                dispatch_owned_vm_fetch(bridge, &input.vm_id, input.vm.clone(), payload).await?;
+                dispatch_owned_vm_fetch(&input.vm_id, input.vm.clone(), payload).await?;
             let response = agentos_native_sidecar_core::respond(
                 &input.request,
                 ResponsePayload::VmFetchResult(VmFetchResponse { response_json }),

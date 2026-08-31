@@ -1721,104 +1721,6 @@ where
     settle_owned_fetch_sync_rpc::<B>(vm, process_id, child_path, request, response).await
 }
 
-/// Poll and service one event for the private VM-fetch loop. Protocol-router
-/// process events use `service_owned_javascript_sync_rpc_request` after claiming
-/// the concrete event, preserving the broker's one-consumer rule.
-pub(crate) async fn service_owned_root_javascript_event<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
-    vm: &crate::state::VmHandle,
-    process_id: &str,
-    preserve_http_wait: bool,
-) -> Result<bool, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
-    enum Turn {
-        Idle,
-        Serviced,
-        Response {
-            request: JavascriptSyncRpcRequest,
-            response: Result<JavascriptSyncRpcServiceResponse, SidecarError>,
-        },
-    }
-
-    let turn = vm.try_command("service owned VM fetch target", |vm| {
-        let socket_paths = build_javascript_socket_path_context(vm)?;
-        let dns = vm.dns.clone();
-        let kernel_readiness = Arc::clone(&vm.kernel_socket_readiness);
-        let capabilities = vm.capabilities.clone();
-        let VmState {
-            kernel,
-            active_processes,
-            ..
-        } = vm;
-        let process = active_processes.get_mut(process_id).ok_or_else(|| {
-            SidecarError::InvalidState(format!("vm.fetch target process disappeared: {process_id}"))
-        })?;
-        let event = process
-            .execution
-            .try_poll_event()
-            .map_err(|error| SidecarError::Execution(error.to_string()))?;
-        let Some(event) = event else {
-            return Ok(Turn::Idle);
-        };
-        match event {
-            ActiveExecutionEvent::JavascriptSyncRpcRequest(request)
-                if preserve_http_wait && request.method == "net.http_wait" =>
-            {
-                process.queue_pending_execution_event(
-                    ActiveExecutionEvent::JavascriptSyncRpcRequest(request),
-                )?;
-                Ok(Turn::Serviced)
-            }
-            ActiveExecutionEvent::JavascriptSyncRpcRequest(request) => {
-                let mut future = Box::pin(service_javascript_sync_rpc(
-                    JavascriptSyncRpcServiceRequest {
-                        bridge,
-                        vm_id,
-                        dns: &dns,
-                        socket_paths: &socket_paths,
-                        kernel,
-                        kernel_readiness,
-                        process,
-                        sync_request: &request,
-                        capabilities,
-                    },
-                ));
-                let mut context = Context::from_waker(Waker::noop());
-                let poll = future.as_mut().poll(&mut context);
-                drop(future);
-                match poll {
-                    Poll::Ready(response) => Ok(Turn::Response { request, response }),
-                    Poll::Pending => {
-                        process.queue_pending_execution_event(
-                            ActiveExecutionEvent::JavascriptSyncRpcRequest(request),
-                        )?;
-                        Ok(Turn::Serviced)
-                    }
-                }
-            }
-            ActiveExecutionEvent::Exited(code) => Err(SidecarError::Execution(format!(
-                "vm.fetch target exited before responding (exit code {code})"
-            ))),
-            other => {
-                process.queue_pending_execution_event(other)?;
-                Ok(Turn::Serviced)
-            }
-        }
-    })?;
-    match turn {
-        Turn::Idle => Ok(false),
-        Turn::Serviced => Ok(true),
-        Turn::Response { request, response } => {
-            settle_owned_fetch_sync_rpc::<B>(vm, process_id, &[], request, response).await?;
-            Ok(true)
-        }
-    }
-}
-
 fn owned_fetch_process_notify(
     vm: &crate::state::VmHandle,
     process_id: &str,
@@ -1836,7 +1738,7 @@ fn owned_fetch_process_notify(
 }
 
 async fn wait_for_owned_fetch_progress(
-    socket: &OwnedKernelFetchSocket,
+    readiness_notify: &Arc<tokio::sync::Notify>,
     process_notify: &Arc<tokio::sync::Notify>,
     deadline: Instant,
 ) -> Result<(), SidecarError> {
@@ -1848,8 +1750,14 @@ async fn wait_for_owned_fetch_progress(
     }
     tokio::time::timeout(remaining, async {
         tokio::select! {
-            _ = socket.readiness_notify.notified() => {},
-            _ = process_notify.notified() => {},
+            _ = readiness_notify.notified() => {},
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                // The ordinary dispatcher exclusively owns guest execution
+                // events. Wake it so runnable microtask or WASM work advances;
+                // this fetch path only owns the kernel response socket.
+                process_notify.notify_one();
+                tokio::task::yield_now().await;
+            },
         }
     })
     .await
@@ -1862,9 +1770,7 @@ async fn wait_for_owned_fetch_progress(
     Ok(())
 }
 
-async fn dispatch_owned_kernel_http_fetch<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
+async fn dispatch_owned_kernel_http_fetch(
     vm: &crate::state::VmHandle,
     target_process_id: &str,
     port: u16,
@@ -1873,11 +1779,7 @@ async fn dispatch_owned_kernel_http_fetch<B>(
     headers: &HttpHeaderCollection,
     body_bytes: Option<&[u8]>,
     max_fetch_response_bytes: usize,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
+) -> Result<String, SidecarError> {
     let mut socket = open_owned_kernel_fetch_socket(
         vm,
         target_process_id,
@@ -1911,23 +1813,20 @@ where
                 preview.chars().take(200).collect::<String>()
             )));
         }
-        let serviced =
-            service_owned_root_javascript_event(bridge, vm_id, vm, target_process_id, true).await?;
         let progressed = poll_owned_kernel_fetch_socket(
             &socket,
             &mut response_buffer,
             &mut peer_closed,
             "vm.fetch",
         )?;
-        if !progressed && !serviced {
-            wait_for_owned_fetch_progress(&socket, &process_notify, deadline).await?;
+        if !progressed {
+            wait_for_owned_fetch_progress(&socket.readiness_notify, &process_notify, deadline)
+                .await?;
         }
     }
 }
 
-async fn start_owned_kernel_http_fetch_stream<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
+async fn start_owned_kernel_http_fetch_stream(
     vm: &crate::state::VmHandle,
     target_process_id: &str,
     port: u16,
@@ -1936,11 +1835,7 @@ async fn start_owned_kernel_http_fetch_stream<B>(
     headers: &HttpHeaderCollection,
     body_bytes: Option<&[u8]>,
     max_response_bytes: usize,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
+) -> Result<String, SidecarError> {
     let socket = open_owned_kernel_fetch_socket(
         vm,
         target_process_id,
@@ -1981,16 +1876,15 @@ where
                 http_loopback_request_timeout().as_millis()
             )));
         }
-        let serviced =
-            service_owned_root_javascript_event(bridge, vm_id, vm, target_process_id, true).await?;
         let progressed = poll_owned_kernel_fetch_socket(
             &socket,
             &mut response_buffer,
             &mut peer_closed,
             "vm.fetchStream",
         )?;
-        if !progressed && !serviced {
-            wait_for_owned_fetch_progress(&socket, &process_notify, deadline).await?;
+        if !progressed {
+            wait_for_owned_fetch_progress(&socket.readiness_notify, &process_notify, deadline)
+                .await?;
         }
     };
 
@@ -2137,17 +2031,11 @@ fn lease_owned_fetch_stream(
     })
 }
 
-async fn read_owned_kernel_http_fetch_stream<B>(
-    bridge: &SharedBridge<B>,
-    vm_id: &str,
+async fn read_owned_kernel_http_fetch_stream(
     vm: &crate::state::VmHandle,
     stream_id: &str,
     requested_max_bytes: usize,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
+) -> Result<String, SidecarError> {
     let max_bytes = requested_max_bytes.clamp(1, VM_FETCH_STREAM_CHUNK_MAX_BYTES);
     let mut lease = lease_owned_fetch_stream(vm, stream_id)?;
     let target_process_id = lease.state().target_process_id.clone();
@@ -2166,9 +2054,6 @@ where
                 http_loopback_request_timeout().as_millis()
             )));
         }
-        let serviced =
-            service_owned_root_javascript_event(bridge, vm_id, vm, &target_process_id, true)
-                .await?;
         let (kernel_pid, socket_id) = (lease.state().kernel_pid, lease.state().socket_id);
         let mut raw_buffer = std::mem::take(&mut lease.state_mut().raw_buffer);
         let mut peer_closed = lease.state().peer_closed;
@@ -2231,21 +2116,9 @@ where
         lease.state_mut().peer_closed = peer_closed;
         if progressed {
             lease.state_mut().last_progress_at = Instant::now();
-        } else if !serviced {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            tokio::time::timeout(remaining, async {
-                tokio::select! {
-                    _ = lease.readiness_notify.notified() => {},
-                    _ = process_notify.notified() => {},
-                }
-            })
-                .await
-                .map_err(|_| {
-                    SidecarError::Execution(format!(
-                        "ERR_AGENTOS_VM_FETCH_TIMEOUT: stream produced no data for {} ms; raise AGENTOS_HTTP_LOOPBACK_REQUEST_TIMEOUT_MS",
-                        http_loopback_request_timeout().as_millis()
-                    ))
-                })?;
+        } else {
+            wait_for_owned_fetch_progress(&lease.readiness_notify, &process_notify, deadline)
+                .await?;
         }
     }
 
@@ -2358,16 +2231,11 @@ async fn dispatch_owned_loopback_http_request(
 
 /// Run `vm.fetch` without holding either the process coordinator or a VM state
 /// borrow over readiness and adapter-response waits.
-pub(in crate::execution) async fn dispatch_owned_vm_fetch<B>(
-    bridge: SharedBridge<B>,
+pub(in crate::execution) async fn dispatch_owned_vm_fetch(
     vm_id: &str,
     vm: crate::state::VmHandle,
     payload: VmFetchRequest,
-) -> Result<String, SidecarError>
-where
-    B: NativeSidecarBridge + Send + 'static,
-    BridgeError<B>: fmt::Debug + Send + Sync + 'static,
-{
+) -> Result<String, SidecarError> {
     let stream_operation = payload.stream_operation.as_deref();
     if matches!(stream_operation, Some("read" | "cancel")) {
         let stream_id = payload.stream_id.as_deref().ok_or_else(|| {
@@ -2377,8 +2245,6 @@ where
         })?;
         return if stream_operation == Some("read") {
             read_owned_kernel_http_fetch_stream(
-                &bridge,
-                vm_id,
                 &vm,
                 stream_id,
                 payload.max_bytes.unwrap_or(64 * 1024) as usize,
@@ -2440,8 +2306,6 @@ where
     if let Some(target_process_id) = kernel_target {
         return if stream_operation == Some("start") {
             start_owned_kernel_http_fetch_stream(
-                &bridge,
-                vm_id,
                 &vm,
                 &target_process_id,
                 payload.port,
@@ -2454,8 +2318,6 @@ where
             .await
         } else {
             dispatch_owned_kernel_http_fetch(
-                &bridge,
-                vm_id,
                 &vm,
                 &target_process_id,
                 payload.port,

@@ -320,20 +320,27 @@ describe("guest http.request transport", () => {
 				),
 			]);
 
-			const head = await Promise.race([
-				vm.fetchStreamStart(3000, new Request("http://guest/events")),
-				new Promise<never>((_, reject) =>
-					setTimeout(
-						() => reject(new Error("stream response head timed out")),
-						5_000,
+			for (let requestIndex = 0; requestIndex < 10; requestIndex++) {
+				const head = await Promise.race([
+					vm.fetchStreamStart(
+						3000,
+						new Request(`http://guest/events-${requestIndex}`),
 					),
-				),
-			]);
-			const chunk = await vm.fetchStreamRead(head.streamId);
+					new Promise<never>((_, reject) =>
+						setTimeout(
+							() => reject(new Error("stream response head timed out")),
+							5_000,
+						),
+					),
+				]);
+				const chunk = await vm.fetchStreamRead(head.streamId);
 
-			expect(head.status, stderr).toBe(200);
-			expect(textDecoder.decode(chunk.body)).toBe("data: websocket-3\n\n");
-			await vm.fetchStreamCancel(head.streamId);
+				expect(head.status, stderr).toBe(200);
+				expect(textDecoder.decode(chunk.body)).toBe(
+					"data: websocket-3\n\n",
+				);
+				await vm.fetchStreamCancel(head.streamId);
+			}
 			await vm.process.kill(child.pid, "SIGKILL");
 		} finally {
 			upstreamWebSocket.clients.forEach((socket) => socket.terminate());
