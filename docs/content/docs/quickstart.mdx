@@ -61,59 +61,73 @@ import { AGENT_PROMPT } from '@/data/agentPrompt';
   </g>
 </svg>
 
+## Quick Start
+
 <Steps>
 
-1. **Install**
+<Step title="Install">
 
-   - **@rivet-dev/agentos** — Actor framework with built-in persistence and orchestration
-   - **@agentos-software/pi** — [Pi](https://github.com/mariozechner/pi-coding-agent) coding agent. [Claude Code](/agentos/docs/agents/claude), [Codex](/agentos/docs/agents/codex), and [OpenCode](/agentos/docs/agents/opencode) install the same way.
+- **@rivet-dev/agentos** — Actor framework with built-in persistence and orchestration
+- **@agentos-software/pi** — [Pi](https://github.com/mariozechner/pi-coding-agent) coding agent. [Claude Code](/agentos/docs/agents/claude), [Codex](/agentos/docs/agents/codex), and [OpenCode](/agentos/docs/agents/opencode) install the same way.
 
-   ```bash
-   npm install @rivet-dev/agentos @agentos-software/pi
-   ```
+```bash
+npm install @rivet-dev/agentos @agentos-software/pi
+```
 
-2. **Create the server**
+</Step>
 
-   <CodeSnippet file="examples/quickstart-app/server.ts" />
+<Step title="Create the server">
 
-3. **Create the client**
+<CodeSnippet file="examples/quickstart-app/server.ts" />
 
-   The client can be any public frontend or another backend. The same `vm` actor is reachable from a plain Node script, a browser/React app, or a separate server.
+</Step>
 
-   <CodeGroup>
-   <CodeSnippet file="examples/quickstart-app/client.ts" />
+<Step title="Create the client">
 
-   <CodeSnippet file="examples/quickstart-app/Agent.tsx" />
-   </CodeGroup>
+The client can be any public frontend or another backend. The same `vm` actor is reachable from a plain Node script, a browser/React app, or a separate server.
 
-4. **Run it**
+<CodeGroup>
+<CodeSnippet file="examples/quickstart-app/client.ts" />
 
-   Start the server, then run the client in a second terminal:
+<CodeSnippet file="examples/quickstart-app/Agent.tsx" />
+</CodeGroup>
 
-   ```bash
-   # Terminal 1: start the server
-   npx tsx server.ts
+</Step>
 
-   # Terminal 2: run the client
-   npx tsx client.ts
-   ```
+<Step title="Run it">
 
-   With the server running, open http://localhost:6420/ui to watch the VM in the actor inspector: the live transcript, the filesystem, and its processes.
+Start the server, then run the client in a second terminal:
 
-5. **Customize**
+```bash
+# Terminal 1: start the server
+npx tsx server.ts
 
-   Now that you have a working agent, customize it to fit your needs:
+# Terminal 2: run the client
+npx tsx client.ts
+```
 
-   - **[Software](/agentos/docs/software)** — Install software packages inside the VM
-   - **[Filesystem](/agentos/docs/filesystem)** — Read, write, and manage files inside the VM
-   - **[Permissions & Resource Limits](/agentos/docs/permissions)** — Gate what the agent can do and cap its resource usage
-   - **[Bindings](/agentos/docs/bindings)** — Expose your JavaScript functions to agents as CLI commands
+With the server running, open http://localhost:6420/ui to watch the VM in the actor inspector: the live transcript, the filesystem, and its processes.
 
-5. **Deploy**
+</Step>
 
-   By default, agentOS runs locally with `npx rivetkit dev` — no infrastructure needed. To run in production, deploy to any of these targets:
+<Step title="Customize">
 
-   <Hosting product="agentos" />
+Now that you have a working agent, customize it to fit your needs:
+
+- **[Software](/agentos/docs/software)** — Install software packages inside the VM
+- **[Filesystem](/agentos/docs/filesystem)** — Read, write, and manage files inside the VM
+- **[Permissions & Resource Limits](/agentos/docs/permissions)** — Gate what the agent can do and cap its resource usage
+- **[Bindings](/agentos/docs/bindings)** — Expose your JavaScript functions to agents as CLI commands
+
+</Step>
+
+<Step title="Deploy">
+
+By default, agentOS runs locally with `npx rivetkit dev` — no infrastructure needed. To run in production, deploy to any of these targets:
+
+<Hosting product="agentos" />
+
+</Step>
 
 </Steps>
 

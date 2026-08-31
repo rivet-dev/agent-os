@@ -10,48 +10,56 @@ Agents can read and search the web with the [Browserbase](https://www.browserbas
 
 <Steps>
 
-1. **Create a Browserbase account**
+<Step title="Create a Browserbase account">
 
-   [Sign up](https://www.browserbase.com/sign-up) and grab your API key and project id from the [dashboard](https://www.browserbase.com/settings):
+[Sign up](https://www.browserbase.com/sign-up) and grab your API key and project id from the [dashboard](https://www.browserbase.com/settings):
 
-   ```bash
-   export BROWSERBASE_API_KEY=bb_...
-   export BROWSERBASE_PROJECT_ID=...
-   ```
+```bash
+export BROWSERBASE_API_KEY=bb_...
+export BROWSERBASE_PROJECT_ID=...
+```
 
-2. **Install**
+</Step>
 
-   ```bash
-   npm install @rivet-dev/agentos @agentos-software/pi @agentos-software/browserbase
-   ```
+<Step title="Install">
 
-3. **Add `browse` to the VM**
+```bash
+npm install @rivet-dev/agentos @agentos-software/pi @agentos-software/browserbase
+```
 
-   <CodeSnippet file="examples/browserbase/server-minimal.ts" />
+</Step>
 
-   <Accordion title="Optional: install the browse skill">
-     Mount the [`browse` CLI skill](https://github.com/browserbase/stagehand/tree/main/packages/cli) into the agent's skills directory so it reaches for `browse` unprompted ([copy the skill folder from the example](https://github.com/rivet-dev/agentos/tree/main/examples/browserbase/skills)):
+<Step title="Add `browse` to the VM">
 
-     <Tabs>
-     <Tab title="Pi">
-     <CodeSnippet file="examples/browserbase/server-skills-pi.ts" />
-     </Tab>
-     <Tab title="Claude Code">
-     <CodeSnippet file="examples/browserbase/server.ts" />
-     </Tab>
-     </Tabs>
-   </Accordion>
+<CodeSnippet file="examples/browserbase/server-minimal.ts" />
 
-4. **Use it**
+<Accordion title="Optional: install the browse skill">
+Mount the [`browse` CLI skill](https://github.com/browserbase/stagehand/tree/main/packages/cli) into the agent's skills directory so it reaches for `browse` unprompted ([copy the skill folder from the example](https://github.com/rivet-dev/agentos/tree/main/examples/browserbase/skills)):
 
-   <Tabs>
-   <Tab title="Agent uses browse">
-   <CodeSnippet file="examples/browserbase/client-agent.ts" />
-   </Tab>
-   <Tab title="Drive browse directly">
-   <CodeSnippet file="examples/browserbase/client-direct.ts" />
-   </Tab>
-   </Tabs>
+<Tabs>
+<Tab title="Pi">
+<CodeSnippet file="examples/browserbase/server-skills-pi.ts" />
+</Tab>
+<Tab title="Claude Code">
+<CodeSnippet file="examples/browserbase/server.ts" />
+</Tab>
+</Tabs>
+</Accordion>
+
+</Step>
+
+<Step title="Use it">
+
+<Tabs>
+<Tab title="Agent uses browse">
+<CodeSnippet file="examples/browserbase/client-agent.ts" />
+</Tab>
+<Tab title="Drive browse directly">
+<CodeSnippet file="examples/browserbase/client-direct.ts" />
+</Tab>
+</Tabs>
+
+</Step>
 
 </Steps>
 

@@ -13,25 +13,41 @@ A package is **self-contained**: package it first, then point `defineSoftware()`
 
 <Steps>
 
-1. **You have** C or Rust source for a command. (Most common commands already ship as `@agentos-software/*` packages you can use directly — compile only new or custom ones.)
+<Step title="You have">
 
-2. **Compile it** to WebAssembly — see [Building Binaries](/agentos/docs/custom-software/building-wasm). There's **no `pack` step**: WASM binaries are self-contained, so the compile output is already the package — a `bin/` of `\0asm` files plus a `package.json` for the name/version:
+C or Rust source for a command. (Most common commands already ship as `@agentos-software/*` packages you can use directly — compile only new or custom ones.)
 
-   ```
-   my-cmds/
-   ├── package.json
-   └── bin/
-       ├── tool-a       # \0asm WebAssembly
-       └── tool-b
-   ```
+</Step>
 
-3. **Define it** — point `defineSoftware()` at that directory:
+<Step title="Compile it">
 
-   <CodeSnippet file="examples/software/quickstart-wasm/my-cmds.ts" />
+Compile it to WebAssembly. See [Building Binaries](/agentos/docs/custom-software/building-wasm). There's **no `pack` step**: WASM binaries are self-contained, so the compile output is already the package — a `bin/` of `\0asm` files plus a `package.json` for the name/version:
 
-4. **Use it** — pass it to a VM; the commands are on `$PATH`:
+```
+my-cmds/
+├── package.json
+└── bin/
+    ├── tool-a       # \0asm WebAssembly
+    └── tool-b
+```
 
-   <CodeSnippet file="examples/software/quickstart-wasm/index.ts" />
+</Step>
+
+<Step title="Define it">
+
+Point `defineSoftware()` at that directory:
+
+<CodeSnippet file="examples/software/quickstart-wasm/my-cmds.ts" />
+
+</Step>
+
+<Step title="Use it">
+
+Pass it to a VM. The commands are on `$PATH`:
+
+<CodeSnippet file="examples/software/quickstart-wasm/index.ts" />
+
+</Step>
 
 </Steps>
 
@@ -39,33 +55,49 @@ A package is **self-contained**: package it first, then point `defineSoftware()`
 
 <Steps>
 
-1. **You have** a local project whose `package.json` `bin` names its commands:
+<Step title="You have">
 
-   ```
-   my-tool/
-   ├── package.json     # "bin": { "my-tool": "cli.js" }
-   └── cli.js           # #!/usr/bin/env node
-   ```
+A local project whose `package.json` `bin` names its commands:
 
-2. **Package it** — `pack` installs the full dependency closure into a self-contained package directory (a flat `node_modules` plus a `bin` map of real files):
+```
+my-tool/
+├── package.json     # "bin": { "my-tool": "cli.js" }
+└── cli.js           # #!/usr/bin/env node
+```
 
-   ```bash
-   npx @rivet-dev/agentos-toolchain pack ./my-tool
-   # writes ./my-tool-package/   (override the location with --out <dir>)
-   #   my-tool-package/
-   #   ├── package.json     # "bin": { "my-tool": "node_modules/my-tool/cli.js" }
-   #   └── node_modules/    # flat, self-contained closure
-   ```
+</Step>
 
-   Commands come from the package's `package.json` `bin` map — **real files, no symlinks** — so the result ships cleanly as an npm dependency. (The runtime makes the `/opt/agentos/bin` symlinks itself when it mounts the package.) A native `.node` addon is an error (it can't run in V8); re-run with `--prune-native` to drop unreachable ones.
+<Step title="Package it">
 
-3. **Define it** — point `defineSoftware()` at the packaged directory:
+`pack` installs the full dependency closure into a self-contained package directory (a flat `node_modules` plus a `bin` map of real files):
 
-   <CodeSnippet file="examples/software/quickstart-node/my-tool.ts" />
+```bash
+npx @rivet-dev/agentos-toolchain pack ./my-tool
+# writes ./my-tool-package/   (override the location with --out <dir>)
+#   my-tool-package/
+#   ├── package.json     # "bin": { "my-tool": "node_modules/my-tool/cli.js" }
+#   └── node_modules/    # flat, self-contained closure
+```
 
-4. **Use it** — pass it to a VM; `my-tool` is now on `$PATH`:
+Commands come from the package's `package.json` `bin` map — **real files, no symlinks** — so the result ships cleanly as an npm dependency. (The runtime makes the `/opt/agentos/bin` symlinks itself when it mounts the package.) A native `.node` addon is an error (it can't run in V8); re-run with `--prune-native` to drop unreachable ones.
 
-   <CodeSnippet file="examples/software/quickstart-node/index.ts" />
+</Step>
+
+<Step title="Define it">
+
+Point `defineSoftware()` at the packaged directory:
+
+<CodeSnippet file="examples/software/quickstart-node/my-tool.ts" />
+
+</Step>
+
+<Step title="Use it">
+
+Pass it to a VM. `my-tool` is now on `$PATH`:
+
+<CodeSnippet file="examples/software/quickstart-node/index.ts" />
+
+</Step>
 
 </Steps>
 
@@ -75,22 +107,38 @@ An agent is a Node.js or WASM package (packaged exactly as above) whose `agentos
 
 <Steps>
 
-1. **You have** an npm package with a `bin/` command that speaks ACP over stdio.
+<Step title="You have">
 
-2. **Package it** — same `pack` as Node.js, with `--agent` naming the ACP entrypoint. That writes the `agent` block into the package's `agentos-package.json`:
+An npm package with a `bin/` command that speaks ACP over stdio.
 
-   ```bash
-   npx @rivet-dev/agentos-toolchain pack @scope/my-agent --out ./packages --agent my-agent-acp
-   # → ./packages/my-agent/current   (its agentos-package.json now has the agent block)
-   ```
+</Step>
 
-3. **Define it** — point `defineSoftware()` at the packaged directory; the agent block is already in its `agentos-package.json`:
+<Step title="Package it">
 
-   <CodeSnippet file="examples/software/quickstart-agent/my-agent.ts" />
+Use the same `pack` command as Node.js, with `--agent` naming the ACP entrypoint. That writes the `agent` block into the package's `agentos-package.json`:
 
-4. **Use it** — choose a session ID, then `openSession({ sessionId, agent })` launches the agent by spawning its `acpEntrypoint`:
+```bash
+npx @rivet-dev/agentos-toolchain pack @scope/my-agent --out ./packages --agent my-agent-acp
+# → ./packages/my-agent/current   (its agentos-package.json now has the agent block)
+```
 
-   <CodeSnippet file="examples/software/quickstart-agent/index.ts" />
+</Step>
+
+<Step title="Define it">
+
+Point `defineSoftware()` at the packaged directory. The agent block is already in its `agentos-package.json`:
+
+<CodeSnippet file="examples/software/quickstart-agent/my-agent.ts" />
+
+</Step>
+
+<Step title="Use it">
+
+Choose a session ID, then `openSession({ sessionId, agent })` launches the agent by spawning its `acpEntrypoint`:
+
+<CodeSnippet file="examples/software/quickstart-agent/index.ts" />
+
+</Step>
 
 </Steps>
 

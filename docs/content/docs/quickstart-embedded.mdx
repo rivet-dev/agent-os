@@ -28,31 +28,41 @@ those responsibilities itself.
 | Agent-to-agent | [Bindings](/agentos/docs/agent-to-agent) between VMs you own | Built into [Rivet Actors](/agentos/docs/agent-to-agent) |
 | Authentication | Your application's own | [Docs](/agentos/docs/authentication) |
 
+## Quick Start
+
 <Steps>
 
-1. **Install**
+<Step title="Install">
 
-   Install the core VM API and the Pi coding agent:
+Install the core VM API and the Pi coding agent:
 
-   ```bash
-   npm install @rivet-dev/agentos-core @agentos-software/pi
-   ```
+```bash
+npm install @rivet-dev/agentos-core @agentos-software/pi
+```
 
-2. **Set your model API key**
+</Step>
 
-   ```bash
-   export ANTHROPIC_API_KEY=your-api-key
-   ```
+<Step title="Set your model API key">
 
-3. **Create an embedded VM**
+```bash
+export ANTHROPIC_API_KEY=your-api-key
+```
 
-   <CodeSnippet file="examples/embedded/quickstart.ts" />
+</Step>
 
-4. **Run it**
+<Step title="Create an embedded VM">
 
-   ```bash
-   npx tsx quickstart.ts
-   ```
+<CodeSnippet file="examples/embedded/quickstart.ts" />
+
+</Step>
+
+<Step title="Run it">
+
+```bash
+npx tsx quickstart.ts
+```
+
+</Step>
 
 </Steps>
 
