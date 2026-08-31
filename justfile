@@ -6,7 +6,7 @@ release *args:
 # Cut a release-preview (debug build, npm-only, branch dist-tag) — see the
 # release-preview skill for the end-to-end flow.
 release-preview REF:
-	gh workflow run .github/workflows/publish.yaml --ref "{{ REF }}"
+	gh workflow run publish.yaml --repo rivet-dev/agentos --ref "{{ REF }}"
 
 # --- @agentos-software/* software packages (independent, PER-PACKAGE versions) ---
 toolchain-build:
