@@ -31,13 +31,6 @@ packages:
   - examples/*/*
   - experiments/gigacode
   - scripts/publish
-  # LOCAL WORKAROUND (do not commit): `website` needs @rivet-dev/docs-theme
-  # symlinked into website/vendor/theme, which isn't set up here and blocks
-  # `pnpm install` workspace-wide. Excluded to build/run the demo locally.
-  - website
-  - website/vendor/theme
-  - website/vendor/theme/vendor/components
-  - website/vendor/theme/vendor/icons
 
 ignoredBuiltDependencies:
   - '@clerk/shared'
