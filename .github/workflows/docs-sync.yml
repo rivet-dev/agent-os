@@ -4,13 +4,12 @@ name: Sync docs
 # docs/ bundle into the website's vendor/agentos and opens a PR there, which is
 # also what triggers the site rebuild.
 #
-# examples/ travels with the bundle because agentOS docs embed snippets from it
-# by repo-root-relative path, and Dynamic Apps docs resolve their snippets here
-# too via snippetFrom in the website's product-metadata.ts.
+# examples/ travels with the bundle because agentOS docs embed snippets from
+# this repository by repo-root-relative path.
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "examples/**"]
+    paths: ["docs/**", "examples/**", ".github/workflows/docs-sync.yml"]
   workflow_dispatch:
 
 jobs:
