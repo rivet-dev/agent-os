@@ -14987,7 +14987,7 @@ if (child.status !== 0) {
             );
         }
 
-        fn command_resolution_executes_node_eval_command() {
+        fn command_resolution_executes_node_module_eval_command() {
             let mut sidecar = create_test_sidecar();
             let (connection_id, session_id) =
                 authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
@@ -15009,8 +15009,11 @@ if (child.status !== 0) {
                         runtime: None,
                         entrypoint: None,
                         args: vec![
+                            String::from("--input-type=module"),
                             String::from("-e"),
-                            String::from("process.stdout.write('node-eval-ok\\n')"),
+                            String::from(
+                                "process.stdout.write(await Promise.resolve('node-module-eval-ok\\n'))",
+                            ),
                         ],
                         env: std::collections::HashMap::new(),
                         cwd: None,
@@ -15030,7 +15033,7 @@ if (child.status !== 0) {
                 drain_process_output(&mut sidecar, &vm_id, "proc-command-node-eval");
 
             assert_eq!(exit_code, Some(0), "stderr: {stderr}");
-            assert!(stdout.contains("node-eval-ok"), "stdout: {stdout}");
+            assert!(stdout.contains("node-module-eval-ok"), "stdout: {stdout}");
         }
         fn command_resolution_rejects_unknown_command() {
             let mut sidecar = create_test_sidecar();
@@ -25652,7 +25655,7 @@ try {
             bindings_javascript_child_process_rejects_invalid_json_file_input_before_dispatch();
             bindings_javascript_child_process_accepts_valid_json_input();
             command_resolution_executes_javascript_path_command_with_sidecar_mappings();
-            command_resolution_executes_node_eval_command();
+            command_resolution_executes_node_module_eval_command();
             command_resolution_rejects_unknown_command();
             python_vfs_rpc_requests_proxy_into_the_vm_kernel_filesystem();
             javascript_sync_rpc_requests_proxy_into_the_vm_kernel_filesystem();

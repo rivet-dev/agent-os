@@ -1698,14 +1698,36 @@ pub(super) fn resolve_special_node_cli_invocation(
     args: &[String],
     env: &mut BTreeMap<String, String>,
 ) -> Option<(String, Vec<String>)> {
-    let first = args.first()?;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "--input-type" => {
+                if !apply_node_input_type(env, args.get(index + 1)?) {
+                    return None;
+                }
+                index += 2;
+            }
+            value if value.starts_with("--input-type=") => {
+                if !apply_node_input_type(env, &value["--input-type=".len()..]) {
+                    return None;
+                }
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+
+    let first = args.get(index)?;
     match first.as_str() {
         "-e" | "--eval" => {
             env.insert(
                 String::from("AGENTOS_NODE_EVAL"),
-                args.get(1).cloned().unwrap_or_default(),
+                args.get(index + 1).cloned().unwrap_or_default(),
             );
-            Some((first.clone(), args.iter().skip(2).cloned().collect()))
+            Some((
+                String::from("-e"),
+                args.iter().skip(index + 2).cloned().collect(),
+            ))
         }
         "-v" | "--version" => {
             env.insert(
@@ -1760,9 +1782,29 @@ if (summary.failed > 0) process.exitCode = 1;
 "#,
                 ),
             );
-            Some((String::from("-e"), args.iter().skip(1).cloned().collect()))
+            Some((
+                String::from("-e"),
+                args.iter().skip(index + 1).cloned().collect(),
+            ))
         }
         _ => None,
+    }
+}
+
+fn apply_node_input_type(env: &mut BTreeMap<String, String>, value: &str) -> bool {
+    match value {
+        "module" => {
+            env.insert(
+                String::from("AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE"),
+                String::from("1"),
+            );
+            true
+        }
+        "commonjs" => {
+            env.remove("AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE");
+            true
+        }
+        _ => false,
     }
 }
 
