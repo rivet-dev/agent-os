@@ -34,6 +34,13 @@ interface GhosttyModule {
 	): HeadlessTerminal;
 }
 
+interface WebAssemblyRuntime {
+	instantiate(
+		bytes: Uint8Array,
+		imports: Record<string, Record<string, () => void>>,
+	): Promise<{ instance: object }>;
+}
+
 interface GhosttyCell {
 	codepoint: number;
 	fg_r: number;
@@ -75,10 +82,19 @@ async function loadGhostty(): Promise<GhosttyModule> {
 		const bytes = await readFile(
 			require.resolve("ghostty-web/ghostty-vt.wasm"),
 		);
-		const { instance } = await WebAssembly.instantiate(bytes, {
+		const webAssembly = Reflect.get(globalThis, "WebAssembly") as
+			| WebAssemblyRuntime
+			| undefined;
+		if (!webAssembly) {
+			throw new Error("WebAssembly is unavailable in this runtime");
+		}
+		const { instance } = await webAssembly.instantiate(bytes, {
 			env: { log: () => {} },
 		});
-		return new Ghostty(instance) as unknown as GhosttyModule;
+		const GhosttyConstructor = Ghostty as unknown as new (
+			instance: object,
+		) => GhosttyModule;
+		return new GhosttyConstructor(instance);
 	})();
 	return ghosttyPromise;
 }
