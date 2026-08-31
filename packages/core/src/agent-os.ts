@@ -325,6 +325,14 @@ export interface HttpResponse {
 	body: Uint8Array;
 }
 
+function headersToRecord(headers: Headers): Record<string, string> {
+	const result: Record<string, string> = {};
+	headers.forEach((value, name) => {
+		result[name] = value;
+	});
+	return result;
+}
+
 export interface ProcessOutput {
 	pid: number;
 	stream: "stdout" | "stderr";
@@ -5088,9 +5096,7 @@ export class AgentOs {
 				port,
 				method: request.method,
 				path: `${url.pathname}${url.search}`,
-				headersJson: JSON.stringify(
-					Object.fromEntries(request.headers.entries()),
-				),
+				headersJson: JSON.stringify(headersToRecord(request.headers)),
 				...(request.method !== "GET" && request.method !== "HEAD"
 					? {
 							bodyBase64: Buffer.from(await request.arrayBuffer()).toString(
@@ -5131,9 +5137,7 @@ export class AgentOs {
 				port,
 				method: request.method,
 				path: `${url.pathname}${url.search}`,
-				headersJson: JSON.stringify(
-					Object.fromEntries(request.headers.entries()),
-				),
+				headersJson: JSON.stringify(headersToRecord(request.headers)),
 				...(request.method !== "GET" && request.method !== "HEAD"
 					? {
 							bodyBase64: Buffer.from(await request.arrayBuffer()).toString(

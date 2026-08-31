@@ -12,7 +12,7 @@ async function runSpawnedProcess(
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 	const stdoutChunks: string[] = [];
 	const stderrChunks: string[] = [];
-	const { pid } = vm.spawn(command, args, {
+	const { pid } = await vm.spawn(command, args, {
 		onStdout: (chunk) => {
 			stdoutChunks.push(textDecoder.decode(chunk));
 		},
@@ -22,8 +22,9 @@ async function runSpawnedProcess(
 		},
 	});
 
+	const exit = await vm.process.wait(pid);
 	return {
-		exitCode: await vm.waitProcess(pid),
+		exitCode: exit.exitCode ?? -1,
 		stdout: stdoutChunks.join(""),
 		stderr: stderrChunks.join(""),
 	};
@@ -248,7 +249,7 @@ describe("guest http.request transport", () => {
 		});
 	});
 
-	test("streams a guest response after the handler opens an outbound websocket", async () => {
+	test("reclaims cancelled guest response streams while an outbound websocket stays open", async () => {
 		const upstream = createServer();
 		const upstreamWebSocket = new WebSocketServer({ server: upstream });
 		upstreamWebSocket.on("connection", (socket) => {
@@ -282,7 +283,7 @@ describe("guest http.request transport", () => {
 			});
 			const script = [
 				'const http = require("node:http");',
-				"const server = http.createServer(async (_request, response) => {",
+				"void (async () => {",
 				`  const socket = new WebSocket("ws://127.0.0.1:${upstreamAddress.port}/", ["rivet", "rivet_token.token"]);`,
 				'  socket.binaryType = "arraybuffer";',
 				"  const binaryLength = await new Promise((resolve, reject) => {",
@@ -290,12 +291,13 @@ describe("guest http.request transport", () => {
 				"    socket.onmessage = (event) => resolve(event.data.byteLength);",
 				"    socket.onerror = reject;",
 				"  });",
-				"  socket.close();",
-				'  response.writeHead(200, { "Content-Type": "text/event-stream" });',
-				"  response.flushHeaders();",
-				"  response.write(`data: websocket-${binaryLength}\\n\\n`);",
-				"});",
-				'server.listen(3000, "0.0.0.0", () => console.log("READY"));',
+				"  const server = http.createServer((_request, response) => {",
+				'    response.writeHead(200, { "Content-Type": "text/event-stream" });',
+				"    response.flushHeaders();",
+				"    response.write(`data: websocket-${binaryLength}\\n\\n`);",
+				"  });",
+				'  server.listen(3000, "0.0.0.0", () => console.log("READY"));',
+				"})().catch((error) => { console.error(error); process.exitCode = 1; });",
 			].join("\n");
 			const child = await vm.spawn("node", ["-e", script], {
 				onStdout: (chunk) => {
@@ -320,7 +322,11 @@ describe("guest http.request transport", () => {
 				),
 			]);
 
-			for (let requestIndex = 0; requestIndex < 10; requestIndex++) {
+			const requestCount = Number.parseInt(
+				process.env.AGENTOS_VM_FETCH_STREAM_REQUESTS ?? "300",
+				10,
+			);
+			for (let requestIndex = 0; requestIndex < requestCount; requestIndex++) {
 				const head = await Promise.race([
 					vm.fetchStreamStart(
 						3000,
@@ -328,7 +334,12 @@ describe("guest http.request transport", () => {
 					),
 					new Promise<never>((_, reject) =>
 						setTimeout(
-							() => reject(new Error("stream response head timed out")),
+							() =>
+								reject(
+									new Error(
+										`stream response head timed out at request ${requestIndex + 1}/${requestCount}`,
+									),
+								),
 							5_000,
 						),
 					),

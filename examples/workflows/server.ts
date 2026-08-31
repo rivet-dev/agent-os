@@ -67,7 +67,7 @@ async function runTests(
 ): Promise<number> {
 	const agent = step.client<typeof registry>().vm.getOrCreate("bug-fixer");
 	const tests = await agent.process.exec("cd /home/agentos/repo && npm test");
-	return tests.exitCode;
+	return tests.exitCode ?? 1;
 }
 // docs:end basic
 
