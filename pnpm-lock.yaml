@@ -3045,9 +3045,6 @@ importers:
       googleapis:
         specifier: ^144.0.0
         version: 144.0.0
-      isolated-vm:
-        specifier: ^6.0.0
-        version: 6.1.2
       long-timeout:
         specifier: ^0.1.1
         version: 0.1.1
@@ -9644,10 +9641,6 @@ packages:
 
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
-
-  isolated-vm@6.1.2:
-    resolution: {integrity: sha512-GGfsHqtlZiiurZaxB/3kY7LLAXR3sgzDul0fom4cSyBjx6ZbjpTrFWiH3z/nUfLJGJ8PIq9LQmQFiAxu24+I7A==}
-    engines: {node: '>=22.0.0'}
 
   isomorphic-timers-promises@1.0.1:
     resolution: {integrity: sha512-u4sej9B1LPSxTGKB/HiuzvEQnXH0ECYkSVQU39koSwmFAxhlEAFl9RdTvLv4TOTQUgBS5O3O5fwUxk6byBZ+IQ==}
@@ -18122,10 +18115,6 @@ snapshots:
   isarray@2.0.5: {}
 
   isexe@2.0.0: {}
-
-  isolated-vm@6.1.2:
-    dependencies:
-      node-gyp-build: 4.8.4
 
   isomorphic-timers-promises@1.0.1: {}
 
