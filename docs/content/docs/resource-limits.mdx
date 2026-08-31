@@ -23,7 +23,7 @@ Set caps on the `limits` object in the `agentOS` config. Limits are grouped by s
 |---|---|---|
 | `resources.maxProcesses` | Concurrent processes in the VM process table | Caps fork bombs and runaway spawning. New spawns fail with `EAGAIN`. |
 | `resources.maxOpenFds` | Open file descriptors | Exhausting the table fails with `EMFILE` / `ENFILE`. |
-| `resources.maxSockets` | Open sockets in the socket table | Bounds concurrent connections; excess `connect`/`accept` fail. |
+| `resources.maxSockets` | Open sockets in the socket table | Default is `256`. This includes guest sockets and the sidecar-owned sockets used to send host requests into VM services. Excess socket operations fail instead of consuming more host resources. |
 | `resources.maxFilesystemBytes` | Total bytes stored in the virtual filesystem | Bounds VFS storage; writes past the budget fail with a no-space error. |
 | `resources.maxInodeCount` | Inodes retained by the virtual filesystem | Default is `16384`; creating another file or directory fails with a no-space error. This is the expected upper bound for filesystem-schema sizing and benchmarks. |
 | `resources.maxWasmFuel` | WASM execution budget | Bounds WASM execution work; unset means no explicit fuel budget. |
@@ -52,6 +52,19 @@ Set caps on the `limits` object in the `agentOS` config. Limits are grouped by s
 | `wasm.runnerCpuTimeLimitMs` | Trusted WASI/WASM runner active-CPU budget | Default is `30000`; `0` disables this budget for trusted configurations. |
 | `process.maxSpawnFileActions` | File actions decoded for one `posix_spawn` call | Default is `4096`; excess actions fail with `E2BIG`. |
 | `process.maxSpawnFileActionBytes` | Serialized file-action bytes for one `posix_spawn` call | Default is `1 MiB`; excess input fails with `E2BIG`. |
+
+### Streaming fetch responses
+
+A VM may have at most `256` host-to-VM streaming HTTP responses open at once.
+This is a fixed runtime limit and does not have a `limits` configuration field.
+A stream occupies one slot after `fetchStreamStart()` returns and releases it
+when `fetchStreamRead()` reports `done: true` or the host calls
+`fetchStreamCancel()`. Opening another stream at the limit fails with
+`ERR_AGENTOS_VM_FETCH_STREAM_LIMIT`.
+
+This limit bounds concurrent streams, not the number of requests a warm VM can
+serve over its lifetime. Completed and cancelled streams do not accumulate
+toward the limit.
 
 ## Behavior at the limit
 

@@ -6,7 +6,7 @@ const client = createClient<typeof registry>({
 });
 const agent = client.vm.getOrCreate("my-agent");
 
-// ── Quick start ───────────────────────────────────────────────────
+// ── Quickstart ────────────────────────────────────────────────────
 async function quickStart() {
 	// docs:start quickstart
 	await agent.sessions.open({

@@ -27,7 +27,7 @@ You don't have to choose: agentOS works with sandboxes through [sandbox mounting
 
 See [agentOS vs Sandbox](https://agentos-sdk.dev/docs/versus-sandbox) for a full comparison.
 
-## Quick start
+## Quickstart
 
 ```bash
 npm install @rivet-dev/agentos @agentos-software/pi
