@@ -12,6 +12,15 @@ on:
         required: true
         type: boolean
         default: true
+      profile:
+        description: "Native binary build profile. Auto keeps releases optimized and previews in debug mode."
+        required: true
+        type: choice
+        options:
+          - auto
+          - release
+          - debug
+        default: auto
 
 concurrency:
   group: publish-${{ github.ref }}
@@ -35,6 +44,7 @@ jobs:
       npm_tag: ${{ steps.ctx.outputs.npm_tag }}
       sha: ${{ steps.ctx.outputs.sha }}
       latest: ${{ steps.ctx.outputs.latest }}
+      build_profile: ${{ steps.mode.outputs.profile }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +59,26 @@ jobs:
       - id: ctx
         name: Resolve publish context
         run: pnpm --filter=publish exec tsx src/ci/bin.ts context-output
+      - id: mode
+        name: Resolve native build profile
+        env:
+          REQUESTED_PROFILE: ${{ inputs.profile }}
+          TRIGGER: ${{ steps.ctx.outputs.trigger }}
+        run: |
+          set -euo pipefail
+          profile="${REQUESTED_PROFILE:-auto}"
+          if [ "$profile" = "auto" ]; then
+            if [ "$TRIGGER" = "release" ]; then
+              profile="release"
+            else
+              profile="debug"
+            fi
+          fi
+          case "$profile" in
+            release|debug) ;;
+            *) echo "invalid native build profile: $profile" >&2; exit 2 ;;
+          esac
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
 
   wasm-commands:
     name: WASM Commands
@@ -121,15 +151,6 @@ jobs:
         with:
           name: agentos-${{ matrix.platform }}
           keep-state: ${{ contains(matrix.runner, 'self-hosted') }}
-      - name: Resolve build profile
-        id: mode
-        run: |
-          set -euo pipefail
-          if [ "${{ needs.context.outputs.trigger }}" = "release" ]; then
-            echo "profile=release" >> "$GITHUB_OUTPUT"
-          else
-            echo "profile=debug" >> "$GITHUB_OUTPUT"
-          fi
       - name: Build linux artifacts
         uses: docker/build-push-action@v6
         with:
@@ -137,7 +158,7 @@ jobs:
           file: docker/build/linux-gnu.Dockerfile
           build-args: |
             TARGET=${{ matrix.target }}
-            BUILD_PROFILE=${{ steps.mode.outputs.profile }}
+            BUILD_PROFILE=${{ needs.context.outputs.build_profile }}
             CACHE_PLATFORM=${{ matrix.platform }}
             RUST_TOOLCHAIN=${{ env.RUST_TOOLCHAIN }}
             LINUX_GNU_LLVM_VERSION=${{ env.LINUX_GNU_LLVM_VERSION }}
@@ -197,15 +218,6 @@ jobs:
           keep-state: true
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: Compute build profile
-        id: mode
-        run: |
-          set -euo pipefail
-          if [ "${{ needs.context.outputs.trigger }}" = "release" ]; then
-            echo "profile=release" >> "$GITHUB_OUTPUT"
-          else
-            echo "profile=debug" >> "$GITHUB_OUTPUT"
-          fi
       - name: Cross-compile via osxcross
         uses: docker/build-push-action@v6
         with:
@@ -214,7 +226,7 @@ jobs:
           build-args: |
             TARGET=${{ matrix.target }}
             CLANG=${{ matrix.clang }}
-            BUILD_PROFILE=${{ steps.mode.outputs.profile }}
+            BUILD_PROFILE=${{ needs.context.outputs.build_profile }}
             CACHE_PLATFORM=${{ matrix.platform }}
             RUST_TOOLCHAIN=${{ env.RUST_TOOLCHAIN }}
           tags: agentos-darwin-${{ matrix.platform }}

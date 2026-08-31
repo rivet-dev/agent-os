@@ -61,6 +61,7 @@ interface CliOpts {
 	dryRun?: boolean;
 	yes?: boolean;
 	skipChecks?: boolean;
+	profile?: string;
 }
 
 async function main() {
@@ -77,10 +78,15 @@ async function main() {
 		.option("--dry-run", "Resolve and print the release plan without triggering the workflow")
 		.option("-y, --yes", "Skip interactive confirmation")
 		.option("--skip-checks", "Skip local type-check fail-fast")
+		.option("--profile <profile>", "Native binary build profile (release or debug)", "release")
 		.parse();
 
 	const opts = program.opts<CliOpts>();
 	const repoRoot = findRepoRoot();
+	const profile = opts.profile ?? "release";
+	if (profile !== "release" && profile !== "debug") {
+		throw new Error(`invalid --profile ${profile}; expected release or debug`);
+	}
 
 	// 1. Resolve version.
 	const version = await resolveVersion({
@@ -107,6 +113,7 @@ async function main() {
 	console.log("Release plan");
 	console.log(`  Version:  ${version}`);
 	console.log(`  Latest:   ${latest}`);
+	console.log(`  Profile:  ${profile}`);
 	console.log(`  Branch:   ${branch.trim()}`);
 	console.log(`  Previous: ${latestGit ?? "(none)"}`);
 	if (opts.dryRun) console.log("  Dry run:  no workflow trigger");
@@ -150,7 +157,7 @@ async function main() {
 	await $({
 		stdio: "inherit",
 		cwd: repoRoot,
-	})`gh workflow run .github/workflows/publish.yaml -f version=${version} -f latest=${latestFlag} --ref ${currentBranch}`;
+	})`gh workflow run .github/workflows/publish.yaml -f version=${version} -f latest=${latestFlag} -f profile=${profile} --ref ${currentBranch}`;
 
 	const { stdout: repo } =
 		await $`gh repo view --json nameWithOwner -q .nameWithOwner`;

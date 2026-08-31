@@ -3,6 +3,10 @@ set positional-arguments := true
 release *args:
 	pnpm --filter=publish release "$@"
 
+# Emergency release path: compile larger, slower debug sidecars.
+release-fast *args:
+	pnpm --filter=publish release --profile debug "$@"
+
 # Cut a release-preview (debug build, npm-only, branch dist-tag) — see the
 # release-preview skill for the end-to-end flow.
 release-preview REF:

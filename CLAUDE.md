@@ -226,6 +226,9 @@ custom host-syscall imports. Treat that target as **native POSIX**;
 - The release workflow must build and stage the native sidecar binaries,
   runtime-sidecar binaries, registry WASM commands, and pyodide assets before
   publish.
+- For an urgent release, use `just release-fast --patch` (or pass
+  `--profile debug` to `just release`). This still rebuilds every release
+  artifact, but publishes larger, unoptimized debug native binaries.
 - `scripts/verify-fixed-versions.mjs` must pass in the committed tree.
 
 ## Docs
