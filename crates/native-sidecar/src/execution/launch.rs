@@ -1059,6 +1059,13 @@ fn sync_host_directory_tree_to_kernel(
 ) -> Result<(), SidecarError> {
     let normalized_host_root = normalize_host_path(host_root);
     let normalized_guest_root = normalize_path(guest_root);
+    if guest_sync_root_targets_live_mount(vm, &normalized_guest_root) {
+        // A host_dir/module_access mount is the kernel's live backing store.
+        // Importing shadow output through a guest alias into that mount is
+        // destructive: symlink reconciliation can unlink or rewrite entries
+        // in the host workspace while a process is exiting.
+        return Ok(());
+    }
     if host_sync_root_is_filesystem_root(host_root) {
         // A process tracked with host cwd "/" would pull the entire host
         // filesystem into the kernel VFS (until the size/inode caps fire).
@@ -1077,6 +1084,15 @@ fn sync_host_directory_tree_to_kernel(
         None,
         None,
     )
+}
+
+fn guest_sync_root_targets_live_mount(vm: &mut VmState, guest_root: &str) -> bool {
+    host_mount_path_for_guest_path(vm, guest_root).is_some()
+        || vm
+            .kernel
+            .realpath(guest_root)
+            .ok()
+            .is_some_and(|resolved| host_mount_path_for_guest_path(vm, &resolved).is_some())
 }
 
 fn sync_host_directory_tree_to_kernel_inner(

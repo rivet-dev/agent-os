@@ -8777,6 +8777,107 @@ console.log(JSON.stringify({ status: "ok", summary }));
             fs::remove_dir_all(host_dir).expect("remove temp dir");
         }
 
+        fn disposing_dirty_process_does_not_reconcile_live_host_mount_into_itself() {
+            let host_dir = temp_dir("agentos-native-sidecar-live-host-dir-dispose");
+            let generated_dir = host_dir.join("generated");
+            fs::create_dir(&generated_dir).expect("create generated workspace directory");
+            let generated_file = generated_dir.join("generated.txt");
+            fs::write(&generated_file, "keep me").expect("seed generated host file");
+            let stale_process_dir = temp_dir("agentos-native-sidecar-stale-process-output");
+            std::os::unix::fs::symlink("stale-target", stale_process_dir.join("generated.txt"))
+                .expect("seed stale process symlink");
+
+            let mut sidecar = create_test_sidecar();
+            let (connection_id, session_id) =
+                authenticate_and_open_session(&mut sidecar).expect("authenticate and open session");
+            let vm_id = create_vm(
+                &mut sidecar,
+                &connection_id,
+                &session_id,
+                PermissionsPolicy::allow_all(),
+            )
+            .expect("create vm");
+            sidecar
+                .vms
+                .get_mut(&vm_id)
+                .expect("created vm")
+                .kernel
+                .symlink("/workspace/generated", "/current")
+                .expect("create guest alias before mounting its target");
+            sidecar
+                .dispatch_blocking(request(
+                    4,
+                    OwnershipScope::vm(&connection_id, &session_id, &vm_id),
+                    RequestPayload::ConfigureVm(ConfigureVmRequest {
+                        mounts: vec![MountDescriptor {
+                            guest_path: String::from("/workspace"),
+                            guest_source: String::from("host_dir"),
+                            guest_fstype: String::from("host_dir"),
+                            read_only: false,
+                            plugin: MountPluginDescriptor {
+                                id: String::from("host_dir"),
+                                config: json!({
+                                    "hostPath": host_dir,
+                                    "readOnly": false,
+                                })
+                                .to_string(),
+                            },
+                        }],
+                        software: Vec::new(),
+                        permissions: None,
+                        module_access_cwd: None,
+                        instructions: Vec::new(),
+                        projected_modules: Vec::new(),
+                        command_permissions: std::collections::HashMap::new(),
+                        loopback_exempt_ports: Vec::new(),
+                        packages: Vec::new(),
+                        packages_mount_at: String::new(),
+                        bootstrap_commands: Vec::new(),
+                        binding_shim_commands: Vec::new(),
+                    }),
+                ))
+                .expect("configure live host mount");
+
+            insert_fake_javascript_parent_process(
+                &mut sidecar,
+                &vm_id,
+                &stale_process_dir,
+                "dirty-host-mount-process",
+            );
+            {
+                let mut vm = sidecar.vms.get_mut(&vm_id).expect("configured vm");
+                let process = vm
+                    .active_processes
+                    .get_mut("dirty-host-mount-process")
+                    .expect("inserted dirty process");
+                process.guest_cwd = String::from("/current");
+                process.host_write_dirty = true;
+            }
+
+            sidecar
+                .dispose_vm_internal_blocking(
+                    &connection_id,
+                    &session_id,
+                    &vm_id,
+                    DisposeReason::Requested,
+                )
+                .expect("dispose VM with live host mount");
+
+            assert_eq!(
+                fs::read_to_string(&generated_file).expect("generated host file must survive"),
+                "keep me"
+            );
+
+            sidecar
+                .close_session_blocking(&connection_id, &session_id)
+                .expect("close session");
+            sidecar
+                .remove_connection_blocking(&connection_id)
+                .expect("remove connection");
+            fs::remove_dir_all(host_dir).expect("remove host dir");
+            fs::remove_dir_all(stale_process_dir).expect("remove stale process dir");
+        }
+
         fn configure_vm_passes_resource_read_limits_to_host_dir_mounts() {
             let host_dir = temp_dir("agentos-native-sidecar-host-dir-read-limit");
             fs::write(host_dir.join("hello.txt"), "hello from host").expect("seed host dir");
@@ -25685,6 +25786,16 @@ try {
         #[test]
         fn service_dirty_host_shadow_sync_precedes_spawn_actions() {
             dirty_host_shadow_sync_precedes_top_level_and_nested_spawn_actions();
+        }
+
+        #[test]
+        fn service_dispose_preserves_live_host_mount_symlinks() {
+            disposing_dirty_process_does_not_reconcile_live_host_mount_into_itself();
+        }
+
+        #[test]
+        fn service_node_input_type_module_eval_uses_esm_parser() {
+            command_resolution_executes_node_module_eval_command();
         }
 
         #[test]
