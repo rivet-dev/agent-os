@@ -175,6 +175,9 @@ fn send_kernel_socket_readiness_event(
         (KernelSocketReadinessEvent::Data, SocketReadinessKind::Data) => {
             agentos_runtime::readiness::ReadyFlags::READABLE
         }
+        (KernelSocketReadinessEvent::Data, SocketReadinessKind::Hangup) => {
+            agentos_runtime::readiness::ReadyFlags::END
+        }
         (KernelSocketReadinessEvent::Datagram, SocketReadinessKind::Data) => {
             agentos_runtime::readiness::ReadyFlags::DATAGRAM
         }

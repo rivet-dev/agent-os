@@ -19,6 +19,7 @@ pub type SocketResult<T> = Result<T, SocketTableError>;
 pub enum SocketReadinessKind {
     Data,
     Accept,
+    Hangup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2423,8 +2424,23 @@ impl SocketTable {
     }
 
     pub fn remove(&self, socket_id: SocketId) -> SocketResult<SocketRecord> {
-        let mut table = lock_or_recover(&self.inner.state);
-        remove_socket(&mut table, socket_id).ok_or_else(|| SocketTableError::not_found(socket_id))
+        let (record, readiness) = {
+            let mut table = lock_or_recover(&self.inner.state);
+            let record = remove_socket(&mut table, socket_id)
+                .ok_or_else(|| SocketTableError::not_found(socket_id))?;
+            let readiness = record
+                .connection_state
+                .as_ref()
+                .and_then(|connection| connection.peer_socket_id)
+                .filter(|peer_socket_id| table.sockets.contains_key(peer_socket_id))
+                .map(|peer_socket_id| SocketReadiness {
+                    socket_id: peer_socket_id,
+                    kind: SocketReadinessKind::Hangup,
+                });
+            (record, readiness)
+        };
+        self.emit_readiness(readiness);
+        Ok(record)
     }
 
     pub fn remove_all_for_pid(&self, owner_pid: u32) -> Vec<SocketRecord> {
