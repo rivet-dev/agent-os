@@ -1,7 +1,7 @@
-import { AgentOs } from "@rivet-dev/agentos";
 import pi from "@agentos-software/pi";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
-// ACP updates and interactive permission records share one durable event union.
+// In the embedded API, ACP updates and permission records share one durable event union.
 const vm = await AgentOs.create({ software: [pi] });
 await vm.sessions.open({ agent: "pi", permissionPolicy: "ask" });
 

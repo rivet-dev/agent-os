@@ -1,4 +1,4 @@
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 const runtime = await AgentOs.create({ permissions: { network: "allow" } });
 

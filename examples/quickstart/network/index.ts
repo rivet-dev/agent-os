@@ -2,9 +2,9 @@
 //
 // vm.network.httpRequest() routes HTTP requests to services running inside the VM.
 // Note: Preview URLs (agent.createPreviewUrl) are only available in the
-// RivetKit actor wrapper, not in the direct VM API. See the actor examples for that.
+// RivetKit actor wrapper, not in the embedded API. See the actor examples for that.
 
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
 	return Promise.race([

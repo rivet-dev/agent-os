@@ -1,5 +1,5 @@
 // docs:start bindings
-import { binding, bindings, AgentOs } from "@rivet-dev/agentos";
+import { AgentOs, binding, bindings } from "@rivet-dev/agentos-core";
 import { z } from "zod";
 
 const toolBindings = bindings({

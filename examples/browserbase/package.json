@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@rivet-dev/agentos": "workspace:*",
+    "@rivet-dev/agentos-core": "workspace:*",
     "rivetkit": "catalog:rivetkit",
     "@agentos-software/claude-code": "workspace:*",
     "@agentos-software/pi": "workspace:*",

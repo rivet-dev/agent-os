@@ -1,5 +1,5 @@
 {
-  "name": "@rivet-dev/agentos-example-core",
+  "name": "@rivet-dev/agentos-example-embedded",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     "check-types": "tsc --noEmit"
   },
   "dependencies": {
-    "@rivet-dev/agentos": "workspace:*",
+    "@rivet-dev/agentos-core": "workspace:*",
     "@rivet-dev/agentos-sandbox": "workspace:*",
     "sandbox-agent": "^0.4.2",
     "dockerode": "^4.0.9",
@@ -16,9 +16,7 @@
     "@agentos-software/claude-code": "workspace:*",
     "@agentos-software/opencode": "workspace:*",
     "@agentos-software/pi": "workspace:*",
-    "zod": "^4.1.11",
-    "@rivet-dev/agentos": "workspace:*",
-    "rivetkit": "catalog:rivetkit"
+    "zod": "^4.1.11"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

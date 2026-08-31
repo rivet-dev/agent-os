@@ -39,3 +39,12 @@ For a fully automated session, omit `permissionPolicy` or choose `allow_all` exp
 <CodeSnippet file="examples/approvals/auto-approve-client.ts" />
 
 For unattended fail-closed work, choose `reject_all` explicitly. ACP approval is advisory; VM filesystem, network, and process permissions remain the security boundary. Automatically handled requests are neither emitted nor persisted.
+
+## Embedded API
+
+Approval requests arrive through the embedded VM's process-local
+`onSessionEvent()` callback.
+
+<CodeSnippet file="examples/embedded/hooks.ts" title="hooks.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

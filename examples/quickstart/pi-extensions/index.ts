@@ -14,8 +14,8 @@
 
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { AgentOs, nodeModulesMount } from "@rivet-dev/agentos";
 import pi from "@agentos-software/pi";
+import { AgentOs, nodeModulesMount } from "@rivet-dev/agentos-core";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL;
@@ -26,7 +26,7 @@ if (!ANTHROPIC_API_KEY) {
 
 const require = createRequire(import.meta.url);
 const MODULE_ACCESS_CWD = resolve(
-	dirname(require.resolve("@rivet-dev/agentos")),
+	dirname(require.resolve("@rivet-dev/agentos-core")),
 	"..",
 );
 const HOME_DIR = "/home/agentos";
@@ -68,7 +68,10 @@ const vm = await AgentOs.create({
 const extensionsDir = "/home/agentos/.pi/agent/extensions";
 await vm.filesystem.mkdir(extensionsDir, { recursive: true });
 await vm.filesystem.mkdir(WORKSPACE_DIR, { recursive: true });
-await vm.filesystem.writeFile(`${extensionsDir}/custom-greeting.js`, extensionSource);
+await vm.filesystem.writeFile(
+	`${extensionsDir}/custom-greeting.js`,
+	extensionSource,
+);
 
 if (ANTHROPIC_BASE_URL) {
 	await vm.filesystem.writeFile(

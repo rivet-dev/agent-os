@@ -1,6 +1,6 @@
 // Run a Python program inside an AgentOS VM.
 
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 const vm = await AgentOs.create();
 

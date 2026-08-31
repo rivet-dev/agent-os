@@ -1,4 +1,4 @@
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 // Imagine this expression came from an AI agent. It executes inside an
 // isolated AgentOS VM and can only use capabilities granted to that VM.

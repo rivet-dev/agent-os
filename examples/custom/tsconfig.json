@@ -4,9 +4,7 @@
     "moduleResolution": "bundler", "noEmit": true, "jsx": "react-jsx",
     "lib": ["ESNext", "DOM"], "types": ["node"], "baseUrl": ".",
     "paths": {
-      "@rivet-dev/agentos": ["../../packages/agentos/src/index.ts"],
-      "@rivet-dev/agentos/client": ["../../packages/agentos/src/client.ts"],
-      "@rivet-dev/agentos/react": ["../../packages/agentos/src/react.ts"]
+      "@rivet-dev/agentos-core": ["../../packages/core/src/index.ts"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx"]

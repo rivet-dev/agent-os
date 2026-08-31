@@ -10,7 +10,7 @@
 //     }],
 //   });
 
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 const vm = await AgentOs.create();
 
@@ -46,6 +46,9 @@ console.log("docs.md exists:", await vm.filesystem.exists("/project/docs.md"));
 // Delete a file, then delete directory recursively
 await vm.filesystem.remove("/project/docs.md");
 await vm.filesystem.remove("/project", { recursive: true });
-console.log("project exists after delete:", await vm.filesystem.exists("/project"));
+console.log(
+	"project exists after delete:",
+	await vm.filesystem.exists("/project"),
+);
 
 await vm.dispose();

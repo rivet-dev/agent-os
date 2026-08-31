@@ -73,3 +73,12 @@ Live subscriptions resume only from new events. Ephemeral message deltas that ha
 The filesystem, core, and TypeScript actor independently own `agentos_fs_schema_version`, `agentos_core_schema_version`, and `agentos_actor_schema_version`. There is no shared schema-version table or global migration sequence. `agentos_actor_preview_tokens`, `agentos_actor_dynamic_mounts`, and `agentos_actor_linked_software` are actor-owned hosting metadata.
 
 This per-VM database is trusted plaintext storage. Session environment values, MCP credentials, prompts, messages, and tool or permission payloads may be stored without encryption or redaction so they can survive sleep. Protect database and backup access accordingly. See [Sessions & Persistence](/agentos/docs/architecture/sessions-persistence/) for exact event storage and retention bounds.
+
+## Embedded API
+
+Configure a SQLite database, then recreate the VM with the same configuration.
+Processes, contexts, subscriptions, and cron jobs remain VM-local.
+
+<CodeSnippet file="examples/embedded/persistence.ts" title="persistence.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

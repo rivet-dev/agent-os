@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@rivet-dev/agentos": "workspace:*",
+    "@rivet-dev/agentos-core": "workspace:*",
     "@rivet-dev/agentos-sandbox": "workspace:*",
     "sandbox-agent": "^0.4.2",
     "dockerode": "^4.0.9",
@@ -17,7 +18,6 @@
     "@agentos-software/opencode": "workspace:*",
     "@agentos-software/pi": "workspace:*",
     "zod": "^4.1.11",
-    "@rivet-dev/agentos": "workspace:*",
     "rivetkit": "catalog:rivetkit"
   },
   "devDependencies": {

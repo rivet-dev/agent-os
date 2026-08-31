@@ -14,7 +14,7 @@ Create a VM with `AgentOs.create()`, then stage a script onto its filesystem wit
 ## Run it
 
 ```bash
-npm install @rivet-dev/agentos
+npm install @rivet-dev/agentos-core
 node index.ts
 ```
 

@@ -1,4 +1,4 @@
-import { AgentOs, binding, bindings } from "@rivet-dev/agentos";
+import { AgentOs, binding, bindings } from "@rivet-dev/agentos-core";
 import { z } from "zod";
 
 const weatherBindings = bindings({

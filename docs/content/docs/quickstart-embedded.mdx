@@ -1,0 +1,66 @@
+---
+title: "Quickstart (Embedded)"
+description: "Run a coding agent in an embedded agentOS VM from an existing Node.js application."
+skill: true
+---
+
+Use the embedded API when you want to run agentOS directly inside an existing
+Node.js application without Rivet Actors. Your application owns VM identity,
+persistence, and lifecycle.
+
+## Choosing between Actors and embedded
+
+Use [Rivet Actors](/agentos/docs/quickstart) when you want agentOS to manage
+persistence, distributed state, sleep and wake, multiplayer, and orchestration.
+Use the embedded API when your application needs direct VM control and will own
+those responsibilities itself.
+
+| | Embedded API | Actor |
+|-|---|---|
+| Persistence | In-memory unless you configure `database`, plus [mounts](/agentos/docs/filesystem#mounts) | Actor SQLite injected automatically |
+| Distributed state | Manage yourself | Built-in |
+| Stateful VMs | Complex to run yourself | Built into Rivet |
+| Sleep/wake | Manual `dispose()` / `create()` | Automatic |
+| Events | Direct in-process callbacks | Broadcast to every connected client |
+| Preview URLs | Serve them from your own application | Built-in signed URL server |
+| Multiplayer | Fan out from your own application | Multiple clients per actor |
+| Orchestration | VM-local [cron](/agentos/docs/cron) while the VM is alive | Workflows, queues, and cron |
+| Agent-to-agent | [Bindings](/agentos/docs/agent-to-agent) between VMs you own | Built into [Rivet Actors](/agentos/docs/agent-to-agent) |
+| Authentication | Your application's own | [Docs](/agentos/docs/authentication) |
+
+<Steps>
+
+1. **Install**
+
+   Install the core VM API and the Pi coding agent:
+
+   ```bash
+   npm install @rivet-dev/agentos-core @agentos-software/pi
+   ```
+
+2. **Set your model API key**
+
+   ```bash
+   export ANTHROPIC_API_KEY=your-api-key
+   ```
+
+3. **Create an embedded VM**
+
+   <CodeSnippet file="examples/embedded/quickstart.ts" />
+
+4. **Run it**
+
+   ```bash
+   npx tsx quickstart.ts
+   ```
+
+</Steps>
+
+`AgentOs.create()` returns a VM handle directly. There is no actor server or
+separate client, and the VM stays alive until you call `dispose()`.
+
+See [Embedded VMs](/agentos/docs/embedded) for lifecycle, persistence,
+configuration, and the shared sidecar, plus links to each capability page's
+`Embedded API` section. Use the [actor quickstart](/agentos/docs/quickstart) when
+you want built-in persistence, sleep and wake, multiplayer, preview URLs, and
+orchestration.

@@ -2,10 +2,10 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import pi from "@agentos-software/pi";
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
-// Create a VM directly with the AgentOS package — no actor runtime, no
-// client/server split. `AgentOs.create()` boots the VM in-process.
+// Embed a VM with the agentOS package. There is no actor runtime or
+// client/server split. `AgentOs.create()` returns a handle to the VM.
 mkdirSync(".agentos", { recursive: true });
 const vm = await AgentOs.create({
 	database: {

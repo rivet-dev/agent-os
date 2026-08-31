@@ -16,3 +16,8 @@ All clients connected to the same actor receive broadcasted events. This enables
 <CodeSnippet file="examples/multiplayer/server.ts" />
 </CodeGroup>
 
+## Embedded API
+
+Multiplayer requires Rivet Actors. An [embedded](/agentos/docs/embedded) VM has no connections and no broadcast: `vm.onSessionEvent()` and the other `on*` callbacks fire only in the process that created the VM. To let several clients watch one agent, either use an actor, or fan those callbacks out over your own application's transport and let it own client identity.
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

@@ -3,7 +3,7 @@
 // Requires Docker. Starts a sandbox-agent container, mounts its filesystem
 // at /mnt/sandbox, and registers sandbox bindings for running commands.
 
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 import { docker } from "@rivet-dev/agentos-sandbox";
 
 const SANDBOX_QUICKSTART_PERMISSIONS = {
@@ -29,7 +29,10 @@ const vm = await AgentOs.create({
 
 try {
 	// Write and read a file through the mounted sandbox filesystem.
-	await vm.filesystem.writeFile(`${SANDBOX_MOUNT}/hello.txt`, "Hello from agentOS!");
+	await vm.filesystem.writeFile(
+		`${SANDBOX_MOUNT}/hello.txt`,
+		"Hello from agentOS!",
+	);
 	const content = await vm.filesystem.readFile(`${SANDBOX_MOUNT}/hello.txt`);
 	console.log("Read from sandbox mount:", new TextDecoder().decode(content));
 

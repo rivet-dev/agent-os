@@ -1,6 +1,6 @@
 // Cron scheduling: schedule recurring commands inside the VM.
 
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 const vm = await AgentOs.create();
 

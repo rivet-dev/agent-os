@@ -8,7 +8,7 @@ AgentOS sessions are durable records backed by the VM's SQLite database.
 
 - The public session ID is stable across VM sleep and adapter restarts.
 - The adapter's private ACP session ID stays internal.
-- The [inspector](/agentos/docs/inspector)'s Transcript tab renders the same session stream live, with a composer for prompting sessions by hand.
+- The Rivet dashboard's Transcript tab renders the same session stream live, with a composer for prompting sessions by hand.
 
 ## Open a session
 
@@ -155,3 +155,12 @@ await agent.sessions.respondPermission({
   value, then replaces the cached collection.
 
 <CodeSnippet file="examples/sessions/runtime-config.ts" />
+
+## Embedded API
+
+The session API is identical. Embedded callbacks are process-local, and history
+only outlives `dispose()` when the VM has a configured `database`.
+
+<CodeSnippet file="examples/embedded/vm.ts" region="sessions" title="vm.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

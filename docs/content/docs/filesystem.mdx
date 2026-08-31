@@ -62,7 +62,7 @@ The actor's durable root is handled separately: the sidecar connects directly to
 
 ## File operations
 
-These operations are primarily what the agent uses inside the VM, and are also available from the client to seed inputs and read results. For large or read-only inputs (a repo, a dataset), a read-only [host mount](#mounts) is faster than copying files in. Programs that need stdin or live output use exec instead (see the [Direct VM API](/agentos/docs/core)).
+These operations are primarily what the agent uses inside the VM, and are also available from the client to seed inputs and read results. For large or read-only inputs (a repo, a dataset), a read-only [host mount](#mounts) is faster than copying files in. Programs that need stdin or live output use exec instead (see [Processes & Shell](/agentos/docs/processes)).
 
 ### Read and write
 
@@ -88,16 +88,7 @@ These operations are primarily what the agent uses inside the VM, and are also a
 
 Filesystem access is governed by the VM permission policy. The filesystem scope is granted by default; restrict it by path, for example to deny a sensitive directory:
 
-```ts
-const vm = agentOS({
-  permissions: {
-    fs: {
-      default: "allow",
-      rules: [{ mode: "deny", operations: ["*"], paths: ["/home/agentos/secrets/**"] }],
-    },
-  },
-});
-```
+<CodeSnippet file="examples/permissions/fs-rules.ts" region="deny-vault" />
 
 See [Permissions](/agentos/docs/permissions) for the full configuration.
 
@@ -114,3 +105,15 @@ With no `mounts` configured, every VM boots an Alpine-based root filesystem with
 - `/etc`, `/lib`, `/opt`, `/root`, `/run`, `/srv`, `/tmp`, `/var`, `/mnt`: standard system paths.
 
 It is backed by the VM's own filesystem and persisted across sleep/wake. Nothing comes from or touches the host disk.
+
+## Embedded API
+
+Filesystem methods and mount descriptors are identical. Configure `database`
+when the root filesystem must survive `dispose()`; mounts persist through their
+own backends.
+
+<CodeSnippet file="examples/embedded/persistence.ts" title="persistence.ts" />
+
+<CodeSnippet file="examples/embedded/mounts.ts" title="mounts.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

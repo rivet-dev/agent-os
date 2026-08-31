@@ -1,6 +1,6 @@
-import { defineSoftware } from "@rivet-dev/agentos";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { defineSoftware } from "@rivet-dev/agentos-core";
 
 const packagePath = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 

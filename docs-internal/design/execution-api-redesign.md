@@ -382,7 +382,7 @@ There is no `vm.executions.*` after this change.
 - `website/src/content/docs/docs/javascript.mdx`
 - `website/src/content/docs/docs/python.mdx`
 - `docs/features/typescript.mdx`
-- `website/src/content/docs/docs/core.mdx`
+- `website/src/content/docs/docs/embedded.mdx`
 - Add a "Contexts" section; retarget the TS namespace; replace all `executionId`
   / `createIfMissing` / `detached` call sites with `createContext` / `contextId`
   / `spawn`. Validate with `pnpm --dir website build`.

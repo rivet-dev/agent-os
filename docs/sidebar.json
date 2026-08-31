@@ -14,14 +14,9 @@
 					"icon": "faForwardFast"
 				},
 				{
-					"title": "Crash Course",
-					"href": "/agentos/docs/crash-course",
-					"icon": "faLightbulb"
-				},
-				{
-					"title": "Inspector",
-					"href": "/agentos/docs/inspector",
-					"icon": "faMagnifyingGlass"
+					"title": "Quickstart (Embedded)",
+					"href": "/agentos/docs/quickstart-embedded",
+					"icon": "faNodeJs"
 				},
 				{
 					"title": "agentOS vs Sandbox",
@@ -104,10 +99,6 @@
 					"title": "Node.js",
 					"href": "/agentos/docs/javascript",
 					"icon": "faNodeJs"
-				},
-				{
-					"title": "Node.js Compatibility",
-					"href": "/agentos/docs/javascript-compatibility"
 				},
 				{
 					"title": "Python",
@@ -242,6 +233,10 @@
 							"href": "/agentos/docs/limitations"
 						},
 						{
+							"title": "Node.js Compatibility",
+							"href": "/agentos/docs/javascript-compatibility"
+						},
+						{
 							"title": "Advanced",
 							"collapsible": true,
 							"pages": [
@@ -310,8 +305,8 @@
 					"collapsible": true,
 					"pages": [
 						{
-							"title": "Direct VM SDK",
-							"href": "/agentos/docs/core"
+							"title": "Embedded VMs",
+							"href": "/agentos/docs/embedded"
 						},
 						{
 							"title": "Debugging",
@@ -345,8 +340,8 @@
 					"href": "/agentos/integrations/flue"
 				},
 				{
-					"title": "Rivet",
-					"href": "/agentos/integrations/rivet"
+					"title": "Rivet Actors",
+					"href": "/agentos/integrations/rivet-actors"
 				},
 				{
 					"title": "Vercel Eve",

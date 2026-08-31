@@ -101,3 +101,11 @@ Every operation inherits the VM [permission policy](/agentos/docs/permissions) a
 [resource limits](/agentos/docs/resource-limits).
 
 <CodeSnippet file="examples/python-sdk-overview/src/limits.ts" />
+
+## Embedded API
+
+The examples above already use `AgentOs.create()`. Python contexts remain
+available until the host calls `dispose()`; there is no actor sleep cycle to
+recreate them after.
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

@@ -89,3 +89,12 @@ Use bindings when you want to expose your own JavaScript functions to agents. Us
 Binding calls from the agent securely invoke your `execute()` functions on the host. Your functions run with full access to the host environment, so you can call databases, APIs, and services directly without proxying credentials into the VM. The agent never sees the credentials, it only sees the binding's input/output contract.
 
 Bindings run on the host with full access to the host environment, so do not expose bindings that could compromise the host without appropriate safeguards.
+
+## Embedded API
+
+Pass the same binding groups to `AgentOs.create()`. The binding contract and
+generated VM commands are unchanged.
+
+<CodeSnippet file="examples/embedded/bindings.ts" title="bindings.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).
