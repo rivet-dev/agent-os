@@ -609,7 +609,14 @@ impl ActiveTcpSocket {
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                         self.saw_remote_end.store(true, Ordering::SeqCst);
-                        Ok(Some(JavascriptTcpSocketEvent::End))
+                        if kernel
+                            .socket_get(socket_id)
+                            .is_some_and(|record| record.peer_socket_id().is_none())
+                        {
+                            Ok(Some(JavascriptTcpSocketEvent::Close { had_error: false }))
+                        } else {
+                            Ok(Some(JavascriptTcpSocketEvent::End))
+                        }
                     }
                     Err(error) if error.code() == "EAGAIN" => {
                         if trace_enabled {
@@ -634,7 +641,16 @@ impl ActiveTcpSocket {
             }
             if revents.intersects(POLLHUP) {
                 self.saw_remote_end.store(true, Ordering::SeqCst);
-                return Ok(Some(JavascriptTcpSocketEvent::End));
+                return Ok(Some(
+                    if kernel
+                        .socket_get(socket_id)
+                        .is_some_and(|record| record.peer_socket_id().is_none())
+                    {
+                        JavascriptTcpSocketEvent::Close { had_error: false }
+                    } else {
+                        JavascriptTcpSocketEvent::End
+                    },
+                ));
             }
             if revents.intersects(POLLERR) {
                 return Ok(Some(JavascriptTcpSocketEvent::Error {
@@ -2996,8 +3012,9 @@ pub(in crate::execution) fn javascript_net_read_value(
         Some(JavascriptTcpSocketEvent::Data { bytes, .. }) => Ok(Value::String(
             base64::engine::general_purpose::STANDARD.encode(bytes),
         )),
-        Some(JavascriptTcpSocketEvent::End | JavascriptTcpSocketEvent::Close { .. }) => {
-            Ok(Value::Null)
+        Some(JavascriptTcpSocketEvent::End) => Ok(Value::Null),
+        Some(JavascriptTcpSocketEvent::Close { .. }) => {
+            Ok(Value::String(String::from(JAVASCRIPT_NET_CLOSE_SENTINEL)))
         }
         Some(JavascriptTcpSocketEvent::Error { code, message }) => {
             let detail = code.unwrap_or_else(|| String::from("socket read"));

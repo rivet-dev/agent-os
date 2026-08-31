@@ -292,6 +292,7 @@ use url::Url;
 
 const DEFAULT_KERNEL_STDIN_READ_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_KERNEL_STDIN_READ_TIMEOUT_MS: u64 = 100;
+const JAVASCRIPT_NET_CLOSE_SENTINEL: &str = "__agentos_net_close__";
 const JAVASCRIPT_NET_TIMEOUT_SENTINEL: &str = "__agentos_net_timeout__";
 const PYTHON_PYODIDE_GUEST_ROOT: &str = "/__agentos_pyodide";
 const PYTHON_PYODIDE_CACHE_GUEST_ROOT: &str = "/__agentos_pyodide_cache";

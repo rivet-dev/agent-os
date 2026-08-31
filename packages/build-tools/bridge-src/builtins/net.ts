@@ -1282,10 +1282,11 @@ function createAcceptedClientHandle(socketId, info) {
 	};
 }
 
-// Must match JAVASCRIPT_NET_TIMEOUT_SENTINEL in crates/native-sidecar/src/execution/mod.rs.
+// Must match the sentinels in crates/native-sidecar/src/execution/mod.rs.
 // A mismatched sentinel is NOT a soft failure: every no-data poll response then
 // falls through to base64 decoding and injects the decoded sentinel bytes into
 // the socket stream as phantom data.
+var NET_BRIDGE_CLOSE_SENTINEL = "__agentos_net_close__";
 var NET_BRIDGE_TIMEOUT_SENTINEL = "__agentos_net_timeout__";
 
 function isNetBridgeTraceEnabled() {
@@ -2897,6 +2898,13 @@ var NetSocket = class _NetSocket extends CanonicalDuplex {
 					countNetBridgeMetric("readWaitsForWake");
 					return;
 				}
+				if (chunk === NET_BRIDGE_CLOSE_SENTINEL) {
+					countNetBridgeMetric("readCloseEvents");
+					this._pendingBridgeWake = false;
+					this._pendingBridgeWakeRetries = 0;
+					this.destroy();
+					return;
+				}
 				if (chunk === null) {
 					if (firstPumpRun && !firstPumpResultRecorded) {
 						firstPumpResultRecorded = true;
@@ -3830,6 +3838,7 @@ export {
 	isValidIPv6Zone,
 	isValidTcpPort,
 	maxNetBridgeMetric,
+	NET_BRIDGE_CLOSE_SENTINEL,
 	NET_BRIDGE_MAX_RAW_WRITE_BYTES,
 	NET_BRIDGE_TIMEOUT_SENTINEL,
 	NET_SERVER_HANDLE_PREFIX,
