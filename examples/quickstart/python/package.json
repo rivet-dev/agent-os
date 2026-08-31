@@ -8,7 +8,7 @@
 		"check-types": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@rivet-dev/agentos": "workspace:*"
+		"@rivet-dev/agentos-core": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^22.10.2",

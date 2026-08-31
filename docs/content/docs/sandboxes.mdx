@@ -136,3 +136,12 @@ ownership to the VM.
 RivetKit `agentOS()` intentionally rejects the `client` form because one client
 cannot be shared safely across actor VMs. Pass a `provider` there so every actor
 VM starts and owns a fresh sandbox.
+
+## Embedded API
+
+Pass a provider or an existing Sandbox Agent client to `AgentOs.create()`.
+With an existing client, set `dispose` when the VM should own its lifecycle.
+
+<CodeSnippet file="examples/sandbox/existing-client.ts" title="existing-client.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

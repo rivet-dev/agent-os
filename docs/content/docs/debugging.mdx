@@ -3,7 +3,7 @@ title: "Debugging"
 description: "Diagnose agentOS sessions, tool calls, VM crashes, and runtime failures by collecting coding-agent logs, sidecar logs, and execution context."
 ---
 
-Before reaching for logs, open the [inspector](/agentos/docs/inspector): it shows the live transcript, pending permission requests (the most common reason an agent looks stuck), and the process tree.
+Before reaching for logs, open the actor inspector in the Rivet dashboard. It shows the live transcript, pending permission requests (the most common reason an agent looks stuck), and the process tree.
 
 Two log streams help diagnose what's happening inside a VM: the **agent's** own output and the **runtime (sidecar)** logs.
 
@@ -13,22 +13,15 @@ The coding agent (ACP adapter) runs as a process inside the VM and uses **stdout
 
 <CodeSnippet file="examples/debugging/agent-logs.ts" />
 
-It's a VM-level option covering every session's agent process; if omitted, chunks are written to the host `process.stderr` by default. See [Sessions → Agent logs](/agentos/docs/sessions#agent-logs).
+It's a VM-level option covering every session's agent process; if omitted,
+chunks are written to the host `process.stderr` by default. See
+[Sessions](/agentos/docs/sessions) for session lifecycle and history.
 
 ## Agent crashes (`onAgentExit`)
 
 If an adapter exits unexpectedly, the runtime logs the exit, does **not** restart it or replay an uncertain prompt, and fires `onAgentExit`:
 
-```ts
-const agentOs = await AgentOs.create({
-  software: [pi],
-  onAgentExit(event) {
-    // restart is always "not_attempted". A later explicit prompt restores the
-    // durable session through resume, load, or bounded transcript continuation.
-    console.warn(`agent exited (code ${event.exitCode}), restart=${event.restart}`);
-  },
-});
-```
+<CodeSnippet file="examples/debugging/agent-exit.ts" />
 
 The durable session and committed SQLite history remain available. The crash *reason* is on the adapter's stderr; the exit event reports that the live runtime disappeared. A later explicit prompt performs restoration. See [Sessions](/agentos/docs/sessions).
 
@@ -60,3 +53,10 @@ Most sidecar log activity is on the session/ACP path. A bare `AgentOs.create()` 
 </Note>
 
 Use **agent logs** to see what the agent did (tool calls, model errors), and **runtime logs** to see what the sidecar did around it (request timing, DNS, lifecycle).
+
+## Embedded API
+
+The examples above already use `AgentOs.create()`. Its callbacks and sidecar
+logs are process-local; the actor inspector is not available.
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

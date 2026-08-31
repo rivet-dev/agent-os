@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { AgentOs, nodeModulesMount } from "@rivet-dev/agentos";
+import { AgentOs, nodeModulesMount } from "@rivet-dev/agentos-core";
 
 // docs:start loading-modules
 // Boot a fully virtualized VM. Module resolution runs entirely inside the

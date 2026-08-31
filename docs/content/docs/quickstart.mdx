@@ -98,7 +98,7 @@ import { AGENT_PROMPT } from '@/data/agentPrompt';
    npx tsx client.ts
    ```
 
-   With the server running, open http://localhost:6420/ui to watch the VM in the [inspector](/agentos/docs/inspector): the live transcript, the filesystem, and its processes.
+   With the server running, open http://localhost:6420/ui to watch the VM in the actor inspector: the live transcript, the filesystem, and its processes.
 
 5. **Customize**
 
@@ -121,9 +121,9 @@ import { AGENT_PROMPT } from '@/data/agentPrompt';
 agentOS is in preview and the API is subject to change. If you run into issues, please [report them on GitHub](https://github.com/rivet-dev/rivet/issues) or [join our Discord](https://rivet.dev/discord).
 </Note>
 
-## Direct VM API
+## Embedded API
 
-The same `@rivet-dev/agentos` package also exports `AgentOs.create()` for direct
-VM control without the actor lifecycle, multiplayer, or orchestration layer.
+The `@rivet-dev/agentos-core` package exports `AgentOs.create()` for embedded VM
+control without the actor lifecycle, multiplayer, or orchestration layer.
 
-See the [direct VM API documentation](/agentos/docs/core) for reference.
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

@@ -4,10 +4,10 @@
 // agent runtime. It may not complete in all environments.
 
 import claude from "@agentos-software/claude-code";
-import type { SoftwareInput } from "@rivet-dev/agentos";
-import { AgentOs } from "@rivet-dev/agentos";
 import opencode from "@agentos-software/opencode";
 import pi from "@agentos-software/pi";
+import type { SoftwareInput } from "@rivet-dev/agentos-core";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 

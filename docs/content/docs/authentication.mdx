@@ -22,3 +22,12 @@ The server declares the credential shape and validates it in `onBeforeConnect` (
 </CodeGroup>
 
 See [Actor Authentication](/actors/docs/authentication) for JWT validation, role-based access control, external auth providers, and token caching.
+
+## Embedded API
+
+This layer requires Rivet Actors. An [embedded](/agentos/docs/embedded) VM has no connections, no `params`, and no `onBeforeConnect`, so `AgentOs.create()` authenticates nobody. Your application authenticates its own callers before it touches the VM handle, and decides which caller may reach which VM.
+
+Session credentials still work through `vm.sessions.open()`; see
+[Models & Credentials](/agentos/docs/models-and-credentials#embedded-api).
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

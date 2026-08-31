@@ -72,3 +72,12 @@ Schedule a recurring agent session to periodically check on a task. This is the 
 <CodeSnippet file="examples/cron/heartbeat.ts" region="heartbeat" />
 
 The agent sleeps between executions and only consumes resources when the cron job fires.
+
+## Embedded API
+
+The cron API is identical, but events are process-local. Jobs only run while
+the embedded VM is alive, so the host must reschedule them after a restart.
+
+<CodeSnippet file="examples/embedded/vm.ts" region="cron" title="vm.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

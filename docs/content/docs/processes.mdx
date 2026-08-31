@@ -48,3 +48,13 @@ Open an interactive shell with PTY support. Subscribe to native `shellData`, `sh
 <CodeSnippet file="examples/processes/shell.ts" />
 <CodeSnippet file="examples/processes/server.ts" />
 </CodeGroup>
+
+## Embedded API
+
+Process and terminal methods are identical except for actor-only shell listing
+and replay. Embedded output and exit callbacks are already scoped to one VM and
+one host process.
+
+<CodeSnippet file="examples/embedded/vm.ts" region="processes" title="vm.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

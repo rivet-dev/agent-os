@@ -1,6 +1,6 @@
 // S3 File System: mount an S3 bucket and use it like a local filesystem.
 //
-// S3 mounting is built into @rivet-dev/agentos: pass a `chunked_s3`
+// S3 mounting is built into @rivet-dev/agentos-core: pass a `chunked_s3`
 // mount descriptor to AgentOs.create({ mounts }) and the VM treats the bucket
 // as a normal directory, so writeFile/readFile/readdir operate transparently
 // against S3.
@@ -16,8 +16,8 @@
 //   S3 harness so `pnpm --dir examples/quickstart/s3-filesystem start`
 //   still exercises the real quickstart flow against signed S3 requests.
 
-import { AgentOs } from "@rivet-dev/agentos";
-import type { MountConfigJsonObject } from "@rivet-dev/agentos";
+import type { MountConfigJsonObject } from "@rivet-dev/agentos-core";
+import { AgentOs } from "@rivet-dev/agentos-core";
 import type { MockS3ServerHandle } from "../../../packages/core/src/test/mock-s3.js";
 import { startMockS3Server } from "../../../packages/core/src/test/mock-s3.js";
 
@@ -67,7 +67,9 @@ if (endpoint) {
 }
 
 const vm = await AgentOs.create({
-	mounts: [{ path: "/mnt/data", plugin: { id: "chunked_s3", config: s3Config } }],
+	mounts: [
+		{ path: "/mnt/data", plugin: { id: "chunked_s3", config: s3Config } },
+	],
 });
 
 try {

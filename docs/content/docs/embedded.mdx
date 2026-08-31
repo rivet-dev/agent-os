@@ -1,0 +1,84 @@
+---
+title: "Embedded VMs"
+description: "Reference for embedding agentOS VMs in an existing Node.js application without Rivet Actors."
+skill: true
+---
+
+Use the embedded API when you already have a Node.js application and want to
+control agentOS VMs directly. You manage VM identity, persistence, and lifecycle
+yourself instead of using Rivet Actors.
+
+To create your first embedded VM, start with the
+[embedded quickstart](/agentos/docs/quickstart-embedded).
+
+This page covers only what is different about embedding. Each capability is
+documented on its own page, which ends with a short `Embedded API` section.
+
+## Embedded API vs actor
+
+| | Embedded API | Actor |
+|-|---|---|
+| Persistence | In-memory unless you configure `database`, plus [mounts](/agentos/docs/filesystem#mounts) | Actor SQLite injected automatically |
+| Distributed state | Manage yourself | Built-in |
+| Stateful VMs | Complex to run yourself | Built into Rivet |
+| Sleep/wake | Manual `dispose()` / `create()` | Automatic |
+| Events | Direct in-process callbacks | Broadcast to every connected client |
+| Preview URLs | Serve them from your own application | Built-in signed URL server |
+| Multiplayer | Fan out from your own application | Multiple clients per actor |
+| Orchestration | VM-local [cron](/agentos/docs/cron) while the VM is alive | Workflows, queues, and cron |
+| Agent-to-agent | [Bindings](/agentos/docs/agent-to-agent) between VMs you own | Built into [Rivet Actors](/agentos/docs/agent-to-agent) |
+| Authentication | Your application's own | [Docs](/agentos/docs/authentication) |
+
+- Use [Rivet Actors](/actors/docs/) for persistence, networking, and
+  orchestration.
+- Use `AgentOs.create()` to embed VM control in a Node.js application.
+- `agentOS()` returns an ordinary TypeScript Rivet actor definition: VM options
+  plus normal actor state, actions, events, queues, connection types, and
+  lifecycle hooks (`onBeforeConnect`).
+- agentOS actions/events merge in automatically; their names are reserved.
+- The VM is created lazily on the first agentOS action after wake, disposed on
+  sleep, so a connection can subscribe before `vmBooted`.
+- Creation input flows through `client.vm.create("key", { input })` and reaches
+  `createState(c, input)` and `onCreate(c, input)`.
+
+## Lifecycle
+
+- `AgentOs.create()` resolves to a VM handle. There is no actor server, client,
+  or connection, so your application owns VM identity: there is no actor key,
+  no `getOrCreate`, and no routing.
+- The VM stays alive until you call `dispose()`. Nothing sleeps it for you.
+- Action timeouts and automatic sleep/wake are [`agentOS()` actor](/agentos/docs/quickstart)
+  features. See [Persistence & Sleep](/agentos/docs/persistence) for the actor
+  behavior the embedded API leaves to you.
+- Every `on*` callback is registered on one handle in one process. Nothing is
+  broadcast to other processes or clients.
+
+## Configuration reference
+
+All VM config is a single flat object passed to `AgentOs.create()`. The
+[`agentOS()` actor](/agentos/docs/quickstart) accepts the same options and layers
+persistence, sleep/wake, and preview URLs on top.
+
+Durability is the one option you must supply yourself. Actors inject their own
+SQLite database; an embedded VM keeps the root filesystem and session catalog
+in memory until you pass `database`, and loses both on `dispose()`.
+
+<CodeSnippet file="examples/embedded/config-reference.ts" title="config-reference.ts" />
+
+See [Filesystem](/agentos/docs/filesystem#mounts) for mount plugins and
+[Software](/agentos/docs/software) for the package list.
+
+## Sidecar process
+
+- Every VM runs inside a **shared sidecar process**, not its own process.
+- All VMs default to a single process-global sidecar (the `default` pool); each
+  extra VM adds only a V8 isolate + its kernel state.
+- This keeps per-VM memory in the tens of MB and warm creation in single-digit
+  ms (see [Performance](/agentos/docs/performance)).
+- Automatic for `agentOS()`, `AgentOs.create()`, and Rivet Actors.
+- Disposing a VM tears down only that VM; the sidecar is reused for the host
+  process lifetime.
+- Advanced: the embedded API exposes explicit sidecar handles to isolate a
+  group of VMs in their own process.
+
+<CodeSnippet file="examples/embedded/advanced.ts" title="advanced.ts" />

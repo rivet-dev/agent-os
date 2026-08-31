@@ -106,7 +106,7 @@ const result = await handle.exec("cat /out.txt");
 console.log(result.stdout); // "hi"
 ```
 
-`@rivet-dev/agentos` runs each VM as a Rivet Actor with built-in persistence, sleep/wake, multiplayer, preview URLs, and orchestration. For direct in-process VM control without the actor runtime, use [`@rivet-dev/agentos-core`](https://agentos-sdk.dev/docs/core) standalone: `AgentOs.create()` boots a VM and returns a handle you call directly.
+`@rivet-dev/agentos` runs each VM as a Rivet Actor with built-in persistence, sleep/wake, multiplayer, preview URLs, and orchestration. To embed VM control in an existing Node.js application without the actor runtime, use [`@rivet-dev/agentos-core`](https://agentos-sdk.dev/docs/quickstart-embedded): `AgentOs.create()` boots a VM and returns a handle you call directly.
 
 See the [Quickstart guide](https://agentos-sdk.dev/docs/quickstart) for the full walkthrough. agentOS is in preview and the API is subject to change — questions and issues welcome on [Discord](https://rivet.dev/discord).
 

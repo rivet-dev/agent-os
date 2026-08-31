@@ -35,3 +35,12 @@ Bindings are the natural communication layer between agents because:
 
 - Each agent has its own isolated VM and filesystem (they share no filesystem). Pass file contents through the binding input, then use `writeFile` in the binding to land them in the other VM.
 - Use [Workflows](/agentos/docs/workflows) to make multi-agent pipelines durable across restarts.
+
+## Embedded API
+
+Create one `AgentOs` handle per agent and call the reviewer from a host binding.
+Your application owns both handles and their lifecycle.
+
+<CodeSnippet file="examples/embedded/agent-to-agent.ts" title="agent-to-agent.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

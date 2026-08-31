@@ -1,4 +1,4 @@
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 import { SandboxAgent } from "sandbox-agent";
 import { docker } from "sandbox-agent/docker";
 

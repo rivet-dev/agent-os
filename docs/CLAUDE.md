@@ -105,6 +105,9 @@ Applies to everything published on the website.
   periods instead.
 - Do not document deltas. A reader who never saw the old version gains nothing
   from "this was renamed".
+- Every agentOS docs page ends with a concise `## Embedded API` section. Prefer
+  checked `<CodeSnippet>` examples over prose. End with: `Read more in the
+  [embedded API quickstart](/agentos/docs/quickstart-embedded).`
 
 ## Previewing locally
 

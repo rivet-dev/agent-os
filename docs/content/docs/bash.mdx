@@ -49,3 +49,10 @@ Every command inherits the VM [permission policy](/agentos/docs/permissions) and
 [resource limits](/agentos/docs/resource-limits).
 
 <CodeSnippet file="examples/quickstart/bash/limits.ts" />
+
+## Embedded API
+
+The examples above already use `AgentOs.create()`. The host owns `dispose()`,
+and filesystem state only outlives the VM when you configure `database`.
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

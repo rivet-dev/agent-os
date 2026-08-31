@@ -8,7 +8,7 @@
 		"check-types": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@rivet-dev/agentos": "workspace:*",
+		"@rivet-dev/agentos-core": "workspace:*",
 		"zod": "^4.1.11"
 	},
 	"devDependencies": {

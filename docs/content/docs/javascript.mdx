@@ -53,6 +53,10 @@ A context runs one operation at a time — reusing a busy `contextId` fails
 immediately. Files, npm, Bash, and type checks may pass the same id, but they run
 in fresh processes and never touch retained memory.
 
+Create the context explicitly before use; an unknown id fails instead of silently
+starting fresh state. A context pins to the first inline language that used it,
+though JavaScript and TypeScript intentionally share one isolate.
+
 Contexts live for the VM lifetime. They do not survive actor sleep/wake, because
 the VM is disposed; create them lazily on the first stateful use after wake.
 
@@ -104,3 +108,11 @@ Every operation inherits the VM [permission policy](/agentos/docs/permissions) a
 [resource limits](/agentos/docs/resource-limits).
 
 <CodeSnippet file="examples/js-sdk-overview/src/limits.ts" />
+
+## Embedded API
+
+The examples above already use `AgentOs.create()`. Contexts remain available
+until the host calls `dispose()`; there is no actor sleep cycle to recreate them
+after.
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

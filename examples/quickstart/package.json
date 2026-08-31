@@ -2,7 +2,7 @@
 	"name": "@rivet-dev/agentos-quickstart",
 	"version": "0.0.1",
 	"private": true,
-	"description": "Quickstart examples for Agent OS. The scripts in this package are the supported example entrypoints.",
+	"description": "Quickstart examples for agentOS. The scripts in this package are the supported example entrypoints.",
 	"type": "module",
 	"scripts": {
 		"check-types": "exit 0",
@@ -22,7 +22,7 @@
 		"pi-extensions": "node --import tsx src/pi-extensions.ts"
 	},
 	"dependencies": {
-		"@rivet-dev/agentos": "workspace:*",
+		"@rivet-dev/agentos-core": "workspace:*",
 		"@rivet-dev/agentos-sandbox": "workspace:*",
 		"sandbox-agent": "^0.4.2",
 		"dockerode": "^4.0.9",
@@ -31,9 +31,7 @@
 		"@agentos-software/claude-code": "workspace:*",
 		"@agentos-software/opencode": "workspace:*",
 		"@agentos-software/pi": "workspace:*",
-		"zod": "^4.1.11",
-		"@rivet-dev/agentos": "workspace:*",
-		"rivetkit": "catalog:rivetkit"
+		"zod": "^4.1.11"
 	},
 	"devDependencies": {
 		"@types/node": "^22.10.2",

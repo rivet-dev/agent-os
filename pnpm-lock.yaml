@@ -443,6 +443,9 @@ importers:
       '@rivet-dev/agentos':
         specifier: workspace:*
         version: link:../../packages/agentos
+      '@rivet-dev/agentos-core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../packages/agentos-sandbox
@@ -550,6 +553,9 @@ importers:
       '@rivet-dev/agentos':
         specifier: workspace:*
         version: link:../../packages/agentos
+      '@rivet-dev/agentos-core':
+        specifier: workspace:*
+        version: link:../../packages/core
       rivetkit:
         specifier: catalog:rivetkit
         version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
@@ -611,52 +617,6 @@ importers:
         version: 5.9.3
 
   examples/codex:
-    dependencies:
-      '@agentos-software/claude-code':
-        specifier: workspace:*
-        version: link:../../software/claude
-      '@agentos-software/git':
-        specifier: workspace:*
-        version: link:../../software/git
-      '@agentos-software/opencode':
-        specifier: workspace:*
-        version: link:../../software/opencode
-      '@agentos-software/pi':
-        specifier: workspace:*
-        version: link:../../software/pi
-      '@rivet-dev/agentos':
-        specifier: workspace:*
-        version: link:../../packages/agentos
-      '@rivet-dev/agentos-sandbox':
-        specifier: workspace:*
-        version: link:../../packages/agentos-sandbox
-      dockerode:
-        specifier: ^4.0.9
-        version: 4.0.10
-      get-port:
-        specifier: ^7.1.0
-        version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
-      sandbox-agent:
-        specifier: ^0.4.2
-        version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
-      zod:
-        specifier: ^4.1.11
-        version: 4.3.6
-    devDependencies:
-      '@types/node':
-        specifier: ^22.10.2
-        version: 22.19.15
-      tsx:
-        specifier: ^4.19.0
-        version: 4.21.0
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-
-  examples/core:
     dependencies:
       '@agentos-software/claude-code':
         specifier: workspace:*
@@ -808,9 +768,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../packages/agentos-sandbox
@@ -820,9 +780,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -854,9 +811,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../packages/agentos-sandbox
@@ -866,9 +823,49 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
+      sandbox-agent:
+        specifier: ^0.4.2
+        version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
+      zod:
+        specifier: ^4.1.11
+        version: 4.3.6
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.15
+      tsx:
+        specifier: ^4.19.0
+        version: 4.21.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  examples/embedded:
+    dependencies:
+      '@agentos-software/claude-code':
+        specifier: workspace:*
+        version: link:../../software/claude
+      '@agentos-software/git':
+        specifier: workspace:*
+        version: link:../../software/git
+      '@agentos-software/opencode':
+        specifier: workspace:*
+        version: link:../../software/opencode
+      '@agentos-software/pi':
+        specifier: workspace:*
+        version: link:../../software/pi
+      '@rivet-dev/agentos-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@rivet-dev/agentos-sandbox':
+        specifier: workspace:*
+        version: link:../../packages/agentos-sandbox
+      dockerode:
+        specifier: ^4.0.9
+        version: 4.0.10
+      get-port:
+        specifier: ^7.1.0
+        version: 7.2.0
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -903,6 +900,9 @@ importers:
       '@rivet-dev/agentos':
         specifier: workspace:*
         version: link:../../packages/agentos
+      '@rivet-dev/agentos-core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../packages/agentos-sandbox
@@ -962,9 +962,9 @@ importers:
 
   examples/js-ai-agent-code-exec:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -978,9 +978,9 @@ importers:
 
   examples/js-child-processes:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -994,9 +994,9 @@ importers:
 
   examples/js-code-mode:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
       zod:
         specifier: ^4.1.11
         version: 4.3.6
@@ -1013,9 +1013,9 @@ importers:
 
   examples/js-dev-servers:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1029,9 +1029,9 @@ importers:
 
   examples/js-filesystem:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1045,9 +1045,9 @@ importers:
 
   examples/js-module-loading:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1061,9 +1061,9 @@ importers:
 
   examples/js-networking:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1077,9 +1077,9 @@ importers:
 
   examples/js-networking-wasm:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1093,9 +1093,9 @@ importers:
 
   examples/js-output-capture:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1109,9 +1109,9 @@ importers:
 
   examples/js-permissions:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1125,9 +1125,9 @@ importers:
 
   examples/js-plugin-systems:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1141,9 +1141,9 @@ importers:
 
   examples/js-process-isolation:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1157,9 +1157,9 @@ importers:
 
   examples/js-quickstart:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1173,9 +1173,9 @@ importers:
 
   examples/js-resource-limits:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1235,9 +1235,9 @@ importers:
 
   examples/js-runtime-platform:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1251,9 +1251,9 @@ importers:
 
   examples/js-sdk-overview:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1267,9 +1267,9 @@ importers:
 
   examples/js-typescript:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -1283,9 +1283,9 @@ importers:
 
   examples/js-virtual-filesystem:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1667,9 +1667,9 @@ importers:
 
   examples/python-quickstart:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1683,9 +1683,9 @@ importers:
 
   examples/python-sdk-overview:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -1711,9 +1711,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../packages/agentos
+        version: link:../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../packages/agentos-sandbox
@@ -1723,9 +1723,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -1812,9 +1809,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -1824,9 +1821,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -1858,9 +1852,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -1870,9 +1864,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -1892,9 +1883,9 @@ importers:
 
   examples/quickstart/bindings:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       zod:
         specifier: ^4.1.11
         version: 4.3.6
@@ -1923,9 +1914,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -1935,9 +1926,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -1969,9 +1957,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -1981,9 +1969,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2015,9 +2000,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -2027,9 +2012,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2061,9 +2043,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -2073,9 +2055,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2107,9 +2086,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -2119,9 +2098,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2153,9 +2129,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -2165,9 +2141,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2199,9 +2172,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -2211,9 +2184,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2245,9 +2215,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -2257,9 +2227,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2279,9 +2246,9 @@ importers:
 
   examples/quickstart/python:
     dependencies:
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -2307,9 +2274,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -2319,9 +2286,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2353,9 +2317,9 @@ importers:
       '@agentos-software/pi':
         specifier: workspace:*
         version: link:../../../software/pi
-      '@rivet-dev/agentos':
+      '@rivet-dev/agentos-core':
         specifier: workspace:*
-        version: link:../../../packages/agentos
+        version: link:../../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../../packages/agentos-sandbox
@@ -2365,9 +2329,6 @@ importers:
       get-port:
         specifier: ^7.1.0
         version: 7.2.0
-      rivetkit:
-        specifier: catalog:rivetkit
-        version: 2.3.10(@opentelemetry/api@1.9.0)(better-sqlite3@12.8.0)(pyodide@0.28.3(bufferutil@4.1.0))(sql.js@1.14.1)(ws@8.21.0(bufferutil@4.1.0))
       sandbox-agent:
         specifier: ^0.4.2
         version: 0.4.2(@vercel/sandbox@2.8.0)(dockerode@4.0.10)(get-port@7.2.0)(zod@4.3.6)
@@ -2448,6 +2409,9 @@ importers:
       '@rivet-dev/agentos':
         specifier: workspace:*
         version: link:../../packages/agentos
+      '@rivet-dev/agentos-core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@rivet-dev/agentos-sandbox':
         specifier: workspace:*
         version: link:../../packages/agentos-sandbox
@@ -6847,6 +6811,7 @@ packages:
   '@rivet-dev/vercel-world@2.3.9':
     resolution: {integrity: sha512-Yy7zGFx1M11styEFVHOo+jEJwRPbqIxcpDkBFoDHSZPhTbdw82pkBo+2p9z+TbX6wdw3CrlHoayLUsVVXPm01Q==}
     engines: {node: '>=22.0.0'}
+    deprecated: Renamed to @rivet-dev/workflow-world.
 
   '@rivetkit/bare-ts@0.6.2':
     resolution: {integrity: sha512-3qndQUQXLdwafMEqfhz24hUtDPcsf1Bu3q52Kb8MqeH8JUh3h6R4HYW3ZJXiQsLcyYyFM68PuIwlLRlg1xDEpg==}

@@ -67,3 +67,12 @@ browse cloud projects list               # list Browserbase projects
 <Note>
 The [interactive driver mode](https://docs.browserbase.com/integrations/skills/browse-cli) (`browse open`, `browse click`, …) is not supported inside the VM yet ([#1631](https://github.com/rivet-dev/agentos/issues/1631)). For interactive automation, run `browse` inside an external sandbox via [External Sandboxes](/agentos/docs/sandboxes).
 </Note>
+
+## Embedded API
+
+Install the same Browserbase software package and pass its credentials through
+the embedded session environment.
+
+<CodeSnippet file="examples/browserbase/embedded.ts" title="embedded.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

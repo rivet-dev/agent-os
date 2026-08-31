@@ -100,3 +100,11 @@ When a scope or matching rule denies an operation, the kernel rejects it with `E
 ```
 EACCES: permission denied, tcp://example.com:80: blocked by network.http policy
 ```
+
+## Embedded API
+
+Pass the same permission policy to `AgentOs.create()`.
+
+<CodeSnippet file="examples/embedded/permissions.ts" title="permissions.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

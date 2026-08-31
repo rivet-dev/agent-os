@@ -1,4 +1,4 @@
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 const vm = await AgentOs.create({ defaultSoftware: false });
 await vm.filesystem.mount({

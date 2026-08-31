@@ -1,4 +1,4 @@
-import { AgentOs } from "@rivet-dev/agentos";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 // Boot a fully virtualized VM. The guest runs inside the kernel isolation
 // boundary, and any child processes it spawns are themselves kernel-managed

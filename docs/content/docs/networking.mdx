@@ -63,3 +63,12 @@ const vm = agentOS({
 ```
 
 See [Permissions](/agentos/docs/permissions) for the full configuration.
+
+## Embedded API
+
+Use `httpRequest()` directly on the VM handle. Preview URLs remain actor-only;
+an embedded host must proxy and authenticate browser traffic itself.
+
+<CodeSnippet file="examples/embedded/vm.ts" region="networking" title="vm.ts" />
+
+Read more in the [embedded API quickstart](/agentos/docs/quickstart-embedded).

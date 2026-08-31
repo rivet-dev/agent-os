@@ -2,8 +2,8 @@
 
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import { AgentOs } from "@rivet-dev/agentos";
 import git from "@agentos-software/git";
+import { AgentOs } from "@rivet-dev/agentos-core";
 
 type ExecResult = {
 	stdout: string;
@@ -13,7 +13,7 @@ type ExecResult = {
 
 const require = createRequire(import.meta.url);
 const MODULE_ACCESS_CWD = resolve(
-	dirname(require.resolve("@rivet-dev/agentos")),
+	dirname(require.resolve("@rivet-dev/agentos-core")),
 	"..",
 );
 const GIT_QUICKSTART_PERMISSIONS = {
@@ -70,7 +70,10 @@ const defaultBranch = parseCurrentBranch(
 );
 
 await run("git -C /tmp/origin checkout -b feature");
-await vm.filesystem.writeFile("/tmp/origin/feature.txt", "checked out from feature\n");
+await vm.filesystem.writeFile(
+	"/tmp/origin/feature.txt",
+	"checked out from feature\n",
+);
 await run("git -C /tmp/origin add feature.txt");
 await run("git -C /tmp/origin commit -m 'add feature file'");
 
@@ -79,7 +82,9 @@ console.log("origin default branch:", defaultBranch);
 console.log(
 	"clone HEAD:",
 	parseHeadRef(
-		new TextDecoder().decode(await vm.filesystem.readFile("/tmp/clone/.git/HEAD")),
+		new TextDecoder().decode(
+			await vm.filesystem.readFile("/tmp/clone/.git/HEAD"),
+		),
 	),
 );
 
