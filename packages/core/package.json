@@ -76,7 +76,6 @@
 		"better-sqlite3": "^12.8.0",
 		"croner": "^10.0.1",
 		"googleapis": "^144.0.0",
-		"isolated-vm": "^6.0.0",
 		"long-timeout": "^0.1.1",
 		"minimatch": "^10.2.4",
 		"zod": "^4.1.11",
