@@ -253,6 +253,16 @@ fn kernel_loopback_readiness_events_are_edge_triggered() {
             kind: SocketReadinessKind::Data,
         }]
     );
+    kernel
+        .socket_close("shell", client.pid(), client_socket)
+        .expect("close loopback client");
+    assert_eq!(
+        take_readiness_events(&events),
+        vec![SocketReadiness {
+            socket_id: accepted,
+            kind: SocketReadinessKind::Hangup,
+        }]
+    );
 
     let udp_sender = kernel
         .socket_create("shell", client.pid(), SocketSpec::udp())

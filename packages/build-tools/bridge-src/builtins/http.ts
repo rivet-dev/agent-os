@@ -4239,7 +4239,7 @@ function attachHttpServerSocket(server, socket) {
   const onEnd = () => {
     ended = true;
     if (buffer.length === 0) {
-      cleanup();
+      finishSocket();
       return;
     }
     scheduleDispatch();
