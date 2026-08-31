@@ -1,0 +1,76 @@
+name: macOS build
+
+# Stage-0 compile gate for the macOS port. Proves the native sidecar (and, via
+# path deps to the secure-exec sibling, the kernel / execution / V8 runtime it
+# links) builds and tests green on Apple Silicon before we invest in
+# per-platform packaging and a release matrix. Not a required check yet.
+# macOS runners are expensive, so this only runs on demand and when native code
+# or lockfiles change.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.github/workflows/macos-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.github/workflows/macos-build.yml'
+
+jobs:
+  build:
+    name: "Build + test native sidecar (apple-silicon)"
+    # macos-14 is the Apple Silicon (aarch64-apple-darwin) runner image.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      # The native crates link the secure-exec sibling repo via Cargo path deps
+      # (../secure-exec/crates/*) and packages/core links @secure-exec/core. Mirror
+      # ci.yml: check secure-exec out into a workspace subdir, then symlink it to
+      # the sibling path the path/link deps expect.
+      - uses: actions/checkout@v4
+        with:
+          repository: rivet-dev/secure-exec
+          ref: main
+          path: _secure-exec-sibling
+      - name: Place secure-exec at the sibling path the path/link deps expect
+        run: ln -s "$GITHUB_WORKSPACE/_secure-exec-sibling" "$GITHUB_WORKSPACE/../secure-exec"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+      # The v8 crate (pulled in transitively via secure-exec-v8-runtime) downloads
+      # a prebuilt static V8 build; cache it per-OS so cold runs do not re-fetch it.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/.rusty_v8
+          key: ${{ runner.os }}-rusty-v8-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rusty-v8-
+      # Build the @secure-exec/core link target so its dist/ exists and any
+      # generated JS assets the native build consumes are present, matching ci.yml.
+      - name: Install + build @secure-exec/core (link target)
+        run: |
+          find "$GITHUB_WORKSPACE/_secure-exec-sibling" -name node_modules -prune -exec rm -rf {} +
+          pnpm -C "$GITHUB_WORKSPACE/_secure-exec-sibling" install --frozen-lockfile
+          pnpm -C "$GITHUB_WORKSPACE/_secure-exec-sibling" --filter @secure-exec/core build
+      - run: find . -path ./_secure-exec-sibling -prune -o -name node_modules -prune -exec rm -rf {} +
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # The real signal: does the native sidecar (and the secure-exec runtime it
+      # links) compile and pass its Rust tests on macOS?
+      - name: Build native sidecar
+        run: cargo build -p agent-os-sidecar
+      - run: cargo test -p agent-os-protocol -- --test-threads=1
+      - run: cargo test -p agent-os-sidecar -- --test-threads=1
