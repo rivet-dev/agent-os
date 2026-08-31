@@ -323,10 +323,22 @@ export const mountConfigSchema = z.union([
 	overlayMountConfigSchema,
 ]);
 
+export const sidecarRuntimeConfigSchema = z
+	.object({
+		executor: z
+			.object({
+				maxActiveVms: positiveInteger.max(Number.MAX_SAFE_INTEGER).optional(),
+			})
+			.strict()
+			.optional(),
+	})
+	.strict();
+
 export const sharedSidecarConfigSchema = z
 	.object({
 		kind: z.literal("shared"),
 		pool: z.string().optional(),
+		runtime: sidecarRuntimeConfigSchema.optional(),
 	})
 	.strict();
 

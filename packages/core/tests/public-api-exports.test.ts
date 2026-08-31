@@ -4,6 +4,7 @@ import {
 	AgentOs,
 	type AgentOsLimits,
 	AgentOsSidecar,
+	type AgentOsSidecarRuntimeConfig,
 	agentOsLimitsSchema,
 	agentOsOptionsSchema,
 	binding,
@@ -45,6 +46,7 @@ import {
 	type SessionStreamEntry,
 	type SpawnOptions,
 	type StdioChannel,
+	sidecarRuntimeConfigSchema,
 	TimerScheduleDriver,
 	type TimingMitigation,
 	validateBindings,
@@ -113,8 +115,13 @@ describe("root public API exports", () => {
 		expect(OPT_AGENTOS_BIN).toBe("/opt/agentos/bin");
 	});
 
+	test("re-exports the sidecar runtime configuration schema", () => {
+		expect(sidecarRuntimeConfigSchema).toBeTypeOf("object");
+	});
+
 	test("re-exports current public SDK types from the root entrypoint", () => {
 		void (null as AgentOsLimits | null);
+		void (null as AgentOsSidecarRuntimeConfig | null);
 		void (null as ContextDescriptor | null);
 		void (null as ExecOptions | null);
 		void (null as HostDirMountPluginConfig | null);

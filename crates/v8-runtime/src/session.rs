@@ -1058,14 +1058,15 @@ struct SessionSlotPermit {
 impl SessionSlotPermit {
     fn try_acquire(
         control: &SlotControl,
-        maximum: usize,
+        maximum: Option<usize>,
         metrics: RuntimeMetrics,
     ) -> Result<Self, String> {
         let (lock, _) = &**control;
         let mut active = lock
             .lock()
             .map_err(|_| String::from("ERR_AGENTOS_VM_EXECUTOR_POISONED: slot lock poisoned"))?;
-        if *active >= maximum {
+        if maximum.is_some_and(|maximum| *active >= maximum) {
+            let maximum = maximum.expect("checked as present");
             return Err(format!(
                 "ERR_AGENTOS_VM_EXECUTOR_LIMIT: active V8 executors reached limit of {maximum}; raise runtime.executor.maxActiveVms"
             ));
@@ -1222,7 +1223,7 @@ pub struct SessionManager {
     /// thread itself retains the concurrency permit, so a successor cannot
     /// consume capacity that is still running untrusted code.
     quarantined: Vec<QuarantinedSession>,
-    max_concurrency: usize,
+    max_concurrency: Option<usize>,
     slot_control: SlotControl,
     /// Typed runtime event sender shared across session threads.
     event_tx: RuntimeEventSender,
@@ -1251,7 +1252,7 @@ struct QuarantinedSession {
 
 impl SessionManager {
     pub fn new(
-        max_concurrency: usize,
+        max_concurrency: Option<usize>,
         event_tx: impl Into<RuntimeEventSender>,
         call_id_router: CallIdRouter,
         snapshot_cache: Arc<SnapshotCache>,
@@ -1273,7 +1274,7 @@ impl SessionManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn max_concurrency(&self) -> usize {
+    pub(crate) fn max_concurrency(&self) -> Option<usize> {
         self.max_concurrency
     }
 
@@ -3943,7 +3944,7 @@ mod tests {
             agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
                 .expect("create test process runtime")
                 .context();
-        let manager = SessionManager::new(max, tx, router, snap_cache, runtime);
+        let manager = SessionManager::new(Some(max), tx, router, snap_cache, runtime);
         (manager, _rx)
     }
 
@@ -3959,9 +3960,9 @@ mod tests {
         let control: SlotControl = Arc::new((Mutex::new(0), Condvar::new()));
         let metrics = RuntimeMetrics::new();
 
-        let first = SessionSlotPermit::try_acquire(&control, 2, metrics.clone())
+        let first = SessionSlotPermit::try_acquire(&control, Some(2), metrics.clone())
             .expect("acquire first VM executor");
-        let second = SessionSlotPermit::try_acquire(&control, 2, metrics.clone())
+        let second = SessionSlotPermit::try_acquire(&control, Some(2), metrics.clone())
             .expect("acquire second VM executor");
         let active = metrics.snapshot().executors[ExecutorMetricClass::Vm.index()].active;
         assert_eq!(active.current, 2);
@@ -4005,7 +4006,7 @@ mod tests {
             return;
         }
         let mut config = agentos_runtime::RuntimeConfig {
-            max_active_vm_executors: 3,
+            max_active_vm_executors: Some(3),
             vm_executor_teardown_timeout_ms: 23,
             ..agentos_runtime::RuntimeConfig::default()
         };
@@ -4023,7 +4024,7 @@ mod tests {
             runtime,
         );
 
-        assert_eq!(manager.max_concurrency, 3);
+        assert_eq!(manager.max_concurrency, Some(3));
         assert_eq!(manager.executor_teardown_timeout, Duration::from_millis(23));
         manager
             .create_session("configured-bounds".into(), None, None, None)

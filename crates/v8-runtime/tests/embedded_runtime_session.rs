@@ -35,6 +35,10 @@ fn embedded_runtime(max_concurrency: usize) -> io::Result<EmbeddedV8Runtime> {
     EmbeddedV8Runtime::new(Some(max_concurrency), process_runtime_context()?)
 }
 
+fn default_embedded_runtime() -> io::Result<EmbeddedV8Runtime> {
+    EmbeddedV8Runtime::new(None, process_runtime_context()?)
+}
+
 fn vm_runtime_context(session_id: &str) -> io::Result<agentos_runtime::RuntimeContext> {
     use agentos_runtime::accounting::{ResourceClass, ResourceLedger, ResourceLimit};
 
@@ -539,6 +543,23 @@ fn assert_overload_rejects_before_thread_and_recovers_after_release() -> io::Res
     Ok(())
 }
 
+fn assert_default_executor_admission_is_uncapped() -> io::Result<()> {
+    let runtime = Arc::new(default_embedded_runtime()?);
+    let first = next_session_id();
+    let second = next_session_id();
+    let _first_receiver = register_and_create_session(&runtime, &first)?;
+    let _second_receiver = register_and_create_session(&runtime, &second)?;
+    assert_eq!(runtime.active_slot_count(), 2);
+
+    for session_id in [&first, &second] {
+        runtime.dispatch(RuntimeCommand::DestroySession {
+            session_id: session_id.clone(),
+        })?;
+        runtime.unregister_session(session_id);
+    }
+    Ok(())
+}
+
 fn assert_shared_runtime_handles_share_concurrency_quota() -> io::Result<()> {
     let runtime = Arc::new(embedded_runtime(3)?);
     let clients = (0..4)
@@ -1024,6 +1045,7 @@ fn embedded_runtime_session_consolidated_behaviors() -> io::Result<()> {
     assert_snapshot_rebuild_on_bridge_change()?;
     assert_execute_rejects_oversized_bridge_code()?;
     assert_direct_zero_cpu_time_limit_disables_timeout()?;
+    assert_default_executor_admission_is_uncapped()?;
     assert_overload_rejects_before_thread_and_recovers_after_release()?;
     assert_shared_runtime_handles_share_concurrency_quota()?;
     assert_sync_bridge_response_bypasses_stream_event_flood()?;

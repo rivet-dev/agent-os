@@ -81,4 +81,35 @@ describe("AgentOs sidecar placement", () => {
 			await sidecar.dispose();
 		}
 	});
+
+	test("validates and preserves process-wide executor settings per shared pool", async () => {
+		const sidecar = await AgentOs.getSharedSidecar({
+			pool: "configured-runtime",
+			runtime: { executor: { maxActiveVms: 7 } },
+		});
+		try {
+			expect(
+				await AgentOs.getSharedSidecar({
+					pool: "configured-runtime",
+					runtime: { executor: { maxActiveVms: 7 } },
+				}),
+			).toBe(sidecar);
+			await expect(
+				AgentOs.getSharedSidecar({
+					pool: "configured-runtime",
+					runtime: { executor: { maxActiveVms: 8 } },
+				}),
+			).rejects.toThrow("already exists with different runtime settings");
+		} finally {
+			await sidecar.dispose();
+		}
+
+		await expect(
+			AgentOs.createSidecar({
+				runtime: { executor: { maxActiveVms: 0 } },
+			}),
+		).rejects.toThrow(
+			"runtime.executor.maxActiveVms must be a positive safe integer",
+		);
+	});
 });

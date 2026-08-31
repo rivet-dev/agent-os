@@ -29,6 +29,7 @@ export {
 	sharedSidecarConfigSchema,
 	sidecarConfigSchema,
 	bindingsSchema,
+	sidecarRuntimeConfigSchema,
 } from "./options-schema.js";
 export { createSnapshotExport } from "./layers.js";
 export { defineSoftware } from "./packages.js";

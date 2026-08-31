@@ -7,6 +7,7 @@ export type {
 	AgentOsSharedSidecarOptions,
 	AgentOsSidecarConfig,
 	AgentOsSidecarDescription,
+	AgentOsSidecarRuntimeConfig,
 	AgentRegistryEntry,
 	AgentRestartOutcome,
 	AgentStderrEvent,

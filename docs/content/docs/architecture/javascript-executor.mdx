@@ -39,8 +39,9 @@ Guest V8 execution is deliberately different:
   the only non-V8 platform thread that enters that isolate.
 - Synchronous guest JavaScript or a synchronous bridge wait can block that
   executor, but cannot occupy a Tokio worker or another VM's executor.
-- The number of active and warm executor threads is bounded separately from
-  socket and task counts.
+- Operators can cap active executor threads separately from socket and task
+  counts with `runtime.executor.maxActiveVms`. Executor admission is uncapped
+  by default and is not derived from the sidecar's reported CPU count.
 
 There is therefore no "Tokio task running a Node.js process." Trusted I/O runs
 as Tokio tasks; untrusted JavaScript runs on a V8 executor thread.

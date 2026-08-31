@@ -459,7 +459,10 @@ impl RuntimeResourceConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub worker_threads: usize,
-    pub max_active_vm_executors: usize,
+    /// Optional process-wide ceiling for concurrently active V8 executors.
+    /// `None` leaves executor admission uncapped; CPU availability only sizes
+    /// the trusted worker pools.
+    pub max_active_vm_executors: Option<usize>,
     pub vm_executor_teardown_timeout_ms: u64,
     pub blocking_worker_threads: usize,
     pub max_blocking_jobs: usize,
@@ -480,7 +483,7 @@ impl Default for RuntimeConfig {
             .unwrap_or(1);
         Self {
             worker_threads: available.clamp(1, 4),
-            max_active_vm_executors: available.max(1),
+            max_active_vm_executors: None,
             vm_executor_teardown_timeout_ms: DEFAULT_VM_EXECUTOR_TEARDOWN_TIMEOUT_MS,
             blocking_worker_threads: available.clamp(1, 4),
             max_blocking_jobs: DEFAULT_MAX_BLOCKING_JOBS,
@@ -500,10 +503,6 @@ impl RuntimeConfig {
     pub fn validate(&self) -> Result<(), RuntimeBuildError> {
         for (field, value) in [
             ("runtime.workerThreads", self.worker_threads),
-            (
-                "runtime.executor.maxActiveVms",
-                self.max_active_vm_executors,
-            ),
             (
                 "runtime.blocking.workerThreads",
                 self.blocking_worker_threads,
@@ -710,6 +709,11 @@ impl RuntimeConfig {
                     "ERR_AGENTOS_RUNTIME_CONFIG: {field} must be greater than zero"
                 )));
             }
+        }
+        if self.max_active_vm_executors == Some(0) {
+            return Err(RuntimeBuildError(String::from(
+                "ERR_AGENTOS_RUNTIME_CONFIG: runtime.executor.maxActiveVms must be greater than zero when configured",
+            )));
         }
         if self.task_poll_watchdog_ms == 0 {
             return Err(RuntimeBuildError(String::from(
@@ -1254,7 +1258,7 @@ pub struct RuntimeContext {
     fairness: FairWorkBroker,
     terminal_failure: Arc<Mutex<Option<TaskTerminalReport>>>,
     task_poll_watchdog: Duration,
-    max_active_vm_executors: usize,
+    max_active_vm_executors: Option<usize>,
     vm_executor_teardown_timeout: Duration,
     blocking_job_timeout: Duration,
     admission_open: Arc<AtomicBool>,
@@ -1285,7 +1289,7 @@ impl RuntimeContext {
         &self.metrics
     }
 
-    pub fn max_active_vm_executors(&self) -> usize {
+    pub fn max_active_vm_executors(&self) -> Option<usize> {
         self.max_active_vm_executors
     }
 
@@ -1790,7 +1794,7 @@ mod tests {
             .contains("runtime.tasks.maxTerminalReports"));
 
         let error = RuntimeConfig {
-            max_active_vm_executors: 0,
+            max_active_vm_executors: Some(0),
             ..RuntimeConfig::default()
         }
         .validate()

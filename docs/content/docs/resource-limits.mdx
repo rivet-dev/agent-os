@@ -15,6 +15,11 @@ Every agentOS VM runs with **per-VM resource and runtime caps**. These caps cont
 
 Set caps on the `limits` object in the `agentOS` config. Limits are grouped by subsystem (`resources`, `process`, `jsRuntime`, `python`, `wasm`, and more). Omitted limits keep their secure default.
 
+V8 executor admission is process-wide rather than per-VM. It is uncapped by
+default and does not derive a ceiling from the sidecar's reported CPU count.
+Operators can set `runtime.executor.maxActiveVms` when creating a sidecar to
+enforce an explicit concurrent-executor ceiling.
+
 <CodeSnippet file="examples/resource-limits/server.ts" />
 
 ## Available caps

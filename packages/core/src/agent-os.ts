@@ -479,14 +479,28 @@ import {
 
 export interface AgentOsSharedSidecarOptions {
 	pool?: string;
+	runtime?: AgentOsSidecarRuntimeConfig;
 }
 
 export interface AgentOsCreateSidecarOptions {
 	sidecarId?: string;
+	runtime?: AgentOsSidecarRuntimeConfig;
+}
+
+/** Process-wide runtime settings applied when the native sidecar starts. */
+export interface AgentOsSidecarRuntimeConfig {
+	executor?: {
+		/** Optional ceiling for concurrent V8 executors. Omit to leave admission uncapped. */
+		maxActiveVms?: number;
+	};
 }
 
 export type AgentOsSidecarConfig =
-	| { kind: "shared"; pool?: string }
+	| {
+			kind: "shared";
+			pool?: string;
+			runtime?: AgentOsSidecarRuntimeConfig;
+	  }
 	| { kind: "explicit"; handle: AgentOsSidecar };
 
 export interface AgentOsSidecarDescription {
@@ -6862,7 +6876,9 @@ function resolveAgentOsSidecar(
 ): AgentOsSidecar {
 	if (!config || config.kind === "shared") {
 		return getSharedAgentOsSidecarInternal(
-			config?.kind === "shared" ? { pool: config.pool } : undefined,
+			config?.kind === "shared"
+				? { pool: config.pool, runtime: config.runtime }
+				: undefined,
 		);
 	}
 
@@ -6894,6 +6910,7 @@ interface SharedSidecarNativeProcess {
 
 interface AgentOsSidecarState {
 	description: AgentOsSidecarDescription;
+	runtime: AgentOsSidecarRuntimeConfig;
 	activeLeases: Set<AgentOsSidecarLeaseRecord>;
 	sharedPool?: string;
 	/**
@@ -7047,7 +7064,7 @@ function ensureSharedSidecarNativeProcess(
 			const client = SidecarProcess.spawn({
 				cwd: REPO_ROOT,
 				command: ensureNativeSidecarBinary(),
-				args: [],
+				args: sidecarRuntimeArgs(state.runtime),
 			});
 			// Track the child immediately — BEFORE the handshake await — so a
 			// failed `authenticateAndOpenSession()` can still reap it (otherwise
@@ -7117,6 +7134,7 @@ export class AgentOsSidecar {
 		sidecarId: string,
 		placement: AgentOsSidecarPlacement,
 		sharedPool?: string,
+		runtime?: AgentOsSidecarRuntimeConfig,
 	) {
 		sidecarStates.set(this, {
 			description: {
@@ -7127,6 +7145,7 @@ export class AgentOsSidecar {
 			},
 			activeLeases: new Set(),
 			sharedPool,
+			runtime: normalizeSidecarRuntimeConfig(runtime),
 		});
 	}
 
@@ -7168,10 +7187,15 @@ function createAgentOsSidecarInternal(
 	options: AgentOsCreateSidecarOptions = {},
 ): AgentOsSidecar {
 	const sidecarId = options.sidecarId ?? `agentos-sidecar-${randomUUID()}`;
-	return new AgentOsSidecar(sidecarId, {
-		kind: "explicit",
+	return new AgentOsSidecar(
 		sidecarId,
-	});
+		{
+			kind: "explicit",
+			sidecarId,
+		},
+		undefined,
+		options.runtime,
+	);
 }
 
 /**
@@ -7205,6 +7229,15 @@ function getSharedAgentOsSidecarInternal(
 	const pool = options.pool ?? "default";
 	const existing = sharedSidecars.get(pool);
 	if (existing && existing.describe().state !== "disposed") {
+		if (options.runtime !== undefined) {
+			const requested = normalizeSidecarRuntimeConfig(options.runtime);
+			const configured = getSidecarState(existing).runtime;
+			if (!sidecarRuntimeConfigsEqual(requested, configured)) {
+				throw new Error(
+					`Shared sidecar pool ${JSON.stringify(pool)} already exists with different runtime settings`,
+				);
+			}
+		}
 		return existing;
 	}
 
@@ -7212,9 +7245,37 @@ function getSharedAgentOsSidecarInternal(
 		`agentos-shared-sidecar:${pool}`,
 		{ kind: "shared", ...(pool ? { pool } : {}) },
 		pool,
+		options.runtime,
 	);
 	sharedSidecars.set(pool, sidecar);
 	return sidecar;
+}
+
+function normalizeSidecarRuntimeConfig(
+	runtime: AgentOsSidecarRuntimeConfig | undefined,
+): AgentOsSidecarRuntimeConfig {
+	const maxActiveVms = runtime?.executor?.maxActiveVms;
+	if (maxActiveVms === undefined) return {};
+	if (!Number.isSafeInteger(maxActiveVms) || maxActiveVms <= 0) {
+		throw new Error(
+			"runtime.executor.maxActiveVms must be a positive safe integer",
+		);
+	}
+	return { executor: { maxActiveVms } };
+}
+
+function sidecarRuntimeConfigsEqual(
+	left: AgentOsSidecarRuntimeConfig,
+	right: AgentOsSidecarRuntimeConfig,
+): boolean {
+	return left.executor?.maxActiveVms === right.executor?.maxActiveVms;
+}
+
+function sidecarRuntimeArgs(runtime: AgentOsSidecarRuntimeConfig): string[] {
+	const maxActiveVms = runtime.executor?.maxActiveVms;
+	return maxActiveVms === undefined
+		? []
+		: ["--max-active-vms", String(maxActiveVms)];
 }
 
 async function leaseAgentOsSidecarVm<TVmAdmin extends InProcessSidecarVmAdmin>(

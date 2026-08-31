@@ -1386,6 +1386,13 @@ pub fn run(control_fd: OwnedFd) -> Result<(), Box<dyn Error>> {
     run_with_extensions(Vec::new(), control_fd)
 }
 
+pub fn run_with_runtime_config(
+    control_fd: OwnedFd,
+    runtime: agentos_runtime::RuntimeConfig,
+) -> Result<(), Box<dyn Error>> {
+    run_with_optional_control_and_runtime(Vec::new(), Some(control_fd), Some(runtime))
+}
+
 pub fn run_combined() -> Result<(), Box<dyn Error>> {
     run_combined_with_extensions(Vec::new())
 }
@@ -1407,10 +1414,21 @@ fn run_with_optional_control(
     extensions: Vec<Box<dyn Extension>>,
     control_fd: Option<OwnedFd>,
 ) -> Result<(), Box<dyn Error>> {
-    let config = NativeSidecarConfig {
+    run_with_optional_control_and_runtime(extensions, control_fd, None)
+}
+
+fn run_with_optional_control_and_runtime(
+    extensions: Vec<Box<dyn Extension>>,
+    control_fd: Option<OwnedFd>,
+    runtime: Option<agentos_runtime::RuntimeConfig>,
+) -> Result<(), Box<dyn Error>> {
+    let mut config = NativeSidecarConfig {
         compile_cache_root: Some(default_compile_cache_root()),
         ..NativeSidecarConfig::default()
     };
+    if let Some(runtime) = runtime {
+        config.runtime = runtime;
+    }
     let runtime = agentos_runtime::SidecarRuntime::process(&config.runtime)?;
     let runtime_context = runtime.context();
     // Initialize the embedded V8 runtime + platform now, on the long-lived main
