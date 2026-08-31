@@ -1046,7 +1046,25 @@ async fn run_async(
     let mut pending_frame: Option<AccountedProtocolFrame> = None;
     let mut limit_warning_closed = false;
     let mut stdin_closed = false;
+    let mut event_round_rotation = 0usize;
     'protocol: loop {
+        // Fairness (odw-43s): service queued VM events once per turn, before
+        // taking on more work. Doing it here rather than only in the wake arms
+        // below is what makes the two lanes round-robin: every path that
+        // handles a frame — the `pending_frame` park, the stdin arm, the
+        // control lane — comes back through here, so a host that pipelines
+        // requests can no longer keep queued VM output unflushed. The call is
+        // bounded (see `service_process_events`), so the reverse cannot happen
+        // either.
+        service_process_events(
+            &mut sidecar,
+            &frame_writer,
+            &active_sessions,
+            &event_ready_tx,
+            &mut event_round_rotation,
+        )
+        .await?;
+
         if let Some(frame) = pending_frame.take() {
             handle_protocol_frame(
                 frame,
@@ -1069,6 +1087,17 @@ async fn run_async(
             biased;
             maybe_shutdown = shutdown_rx.recv() => {
                 let Some(control) = maybe_shutdown else {
+                    // The only shutdown sender lives in the response/control
+                    // reader, so this channel also closes when that reader dies
+                    // on an abnormal EOF or decode error — a transport failure,
+                    // not a graceful stop. The reader reports the failure on
+                    // `write_error_rx` *before* it exits, so a queued error here
+                    // is authoritative; without this check, whether the sidecar
+                    // exits 0 or 1 on a control-stream EOF is a race between
+                    // this arm and the `write_error_rx` arm below.
+                    if let Ok(error) = write_error_rx.try_recv() {
+                        return Err(io::Error::new(io::ErrorKind::BrokenPipe, error).into());
+                    }
                     break 'protocol;
                 };
                 match control.payload {
@@ -1119,6 +1148,21 @@ async fn run_async(
                     None => stdin_closed = true,
                 }
             }
+            // Event-pump wakes. These stay BELOW `stdin_rx`: a guest emitting
+            // sustained stdout keeps `process_event_notify` armed at essentially
+            // all times (every queued execution event notifies, and
+            // `pump_process_events` re-arms whenever a VM burns its quantum), so
+            // above stdin they would win the `biased` select forever and stall
+            // the request lane — which is also the cancel lane, the only way to
+            // stop that guest. The arms carry no work: the flush happens once
+            // per turn at the top of the `'protocol` loop, so consuming the edge
+            // that woke the loop is all they have to do here.
+            maybe_ready = event_ready_rx.recv() => {
+                let Some(()) = maybe_ready else {
+                    break;
+                };
+            }
+            _ = process_event_notify.notified() => {}
             maybe_warning = limit_warning_rx.recv(), if !limit_warning_closed => {
                 match maybe_warning {
                     Some(warning) => {
@@ -1156,46 +1200,6 @@ async fn run_async(
                         limit_warning_closed = true;
                     }
                 }
-            }
-            maybe_ready = event_ready_rx.recv() => {
-                let Some(()) = maybe_ready else {
-                    break;
-                };
-                loop {
-                    let mut emitted_frame = false;
-                    for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
-                        if let Some(frame) = sidecar
-                            .poll_event_wire(&session.ownership_scope(), Duration::ZERO)
-                            .await?
-                        {
-                            send_output_frame(&frame_writer, ProtocolFrame::EventFrame(frame))?;
-                            emitted_frame = true;
-                        }
-                    }
-
-                    if !emitted_frame {
-                        break;
-                    }
-                }
-                flush_sidecar_requests(&mut sidecar, &frame_writer)?;
-            }
-            _ = process_event_notify.notified() => {
-                for session in active_sessions.iter().cloned().collect::<Vec<_>>() {
-                    if sidecar.pump_process_events(&session.compat_ownership_scope()).await? {
-                        match event_ready_tx.try_send(()) {
-                            Ok(())
-                            | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::BrokenPipe,
-                                    "event-ready wake receiver closed",
-                                )
-                                .into());
-                            }
-                        }
-                    }
-                }
-                flush_sidecar_requests(&mut sidecar, &frame_writer)?;
             }
             maybe_write_error = write_error_rx.recv() => {
                 if let Some(error) = maybe_write_error {
@@ -1786,6 +1790,105 @@ fn enqueue_stdin_frame(
     })
 }
 
+/// The emit round in `service_process_events` walks the sessions one frame at a
+/// time, so sessions are served fairly *within* a round — but the frame budget is
+/// global, so a round that hits the cap stops partway down the list. Always
+/// starting at the same end would therefore starve every session past the cap
+/// outright once more than `vm_quantum_operations` sessions (default 64,
+/// `crates/runtime/src/lib.rs`) are emitting: every round would serve the same
+/// leading 64 and never reach the rest. Advancing the starting point by one per
+/// round moves the cut instead of pinning it.
+fn rotated_sessions(sessions: &BTreeSet<SessionScope>, rotation: usize) -> Vec<SessionScope> {
+    let mut sessions = sessions.iter().cloned().collect::<Vec<_>>();
+    let len = sessions.len();
+    if len > 0 {
+        sessions.rotate_left(rotation % len);
+    }
+    sessions
+}
+
+/// One bounded round of process-event servicing: pump every active session's
+/// queued execution events into the durable sidecar queues, then emit at most
+/// `runtime.fairness.vm_quantum_operations` event frames.
+///
+/// Fairness (odw-43s). The `'protocol` loop calls this once per turn, so a host
+/// that pipelines stdin frames can no longer keep queued VM output unflushed.
+/// The frame cap is what keeps the converse true, and it is load-bearing rather
+/// than defensive: neither half of this work is self-limiting under a guest
+/// emitting sustained stdout. `ActiveProcess::queue_pending_execution_event`
+/// notifies for *every* queued event and `pump_process_events` re-arms the
+/// notify itself whenever a VM burns its `vm_quantum_operations` quantum, so
+/// the wake edge is essentially always armed; and a zero-timeout
+/// `poll_event_wire` is not a pure drain either — `poll_event` still pulls
+/// `process_event_receiver` into `pending_process_events`, so the guest can
+/// refill it as fast as this loop empties it. Draining to exhaustion here would
+/// therefore hold the loop off `stdin_rx` indefinitely, and `stdin_rx` is the
+/// lane that carries cancels: `route_decoded_combined_frame` sends every
+/// `RequestFrame` — `cancel_execution` included — to `stdin_tx`, while the
+/// control lane admits only sidecar responses and shutdown. Whatever the cap
+/// leaves behind re-arms `event_ready_tx`, so the next turn resumes it after
+/// stdin has had its own.
+///
+/// The cap is global across sessions rather than per session — a per-session cap
+/// would make one round cost `sessions * quantum` frames and put the cancel lane
+/// back behind a wait that grows with tenant count. `rotated_sessions` is what
+/// keeps the global cap fair across sessions; see its comment.
+async fn service_process_events(
+    sidecar: &mut NativeSidecar<LocalBridge>,
+    writer: &ProtocolFrameWriter,
+    active_sessions: &BTreeSet<SessionScope>,
+    event_ready_tx: &Sender<()>,
+    rotation: &mut usize,
+) -> Result<(), Box<dyn Error>> {
+    let sessions = rotated_sessions(active_sessions, *rotation);
+    *rotation = rotation.wrapping_add(1);
+    for session in &sessions {
+        sidecar
+            .pump_process_events(&session.compat_ownership_scope())
+            .await?;
+    }
+
+    let frame_budget = sidecar.config.runtime.fairness.vm_quantum_operations.max(1);
+    let mut emitted = 0usize;
+    let mut more_pending = false;
+    'drain: loop {
+        let mut emitted_frame = false;
+        for session in &sessions {
+            if let Some(frame) = sidecar
+                .poll_event_wire(&session.ownership_scope(), Duration::ZERO)
+                .await?
+            {
+                send_output_frame(writer, ProtocolFrame::EventFrame(frame))?;
+                emitted_frame = true;
+                emitted += 1;
+                if emitted >= frame_budget {
+                    more_pending = true;
+                    break 'drain;
+                }
+            }
+        }
+
+        if !emitted_frame {
+            break;
+        }
+    }
+
+    if more_pending {
+        match event_ready_tx.try_send(()) {
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "event-ready wake receiver closed",
+                )
+                .into());
+            }
+        }
+    }
+
+    flush_sidecar_requests(sidecar, writer)
+}
+
 fn flush_sidecar_requests(
     sidecar: &mut NativeSidecar<LocalBridge>,
     writer: &ProtocolFrameWriter,
@@ -2043,6 +2146,95 @@ mod tests {
             ),
             StdinReaderFlow::Stop,
         );
+    }
+
+    /// The `'protocol` loop's arm order (odw-43s) rests on this: the event-pump
+    /// wakes sit BELOW `stdin_rx` because `stdin_rx` is the lane a cancel
+    /// arrives on. Demoting stdin under the event arms would leave a guest
+    /// flooding stdout uncancellable, since its own flood keeps those arms
+    /// ready. If cancels ever move to the control lane, this test fails and the
+    /// ordering argument can be revisited.
+    #[test]
+    fn cancel_execution_is_admitted_on_the_stdin_lane_not_the_control_lane() {
+        let transport = test_callback_transport(FrameSidecarRequestLimits {
+            max_pending_responses: 4,
+            max_pending_response_bytes: 4096,
+            max_frame_bytes: 4096,
+        });
+        let ingress_budget = test_protocol_budget(4, 4096, "test ordinary ingress");
+        let control_budget = test_protocol_budget(4, 4096, "test control ingress");
+        let (ordinary_tx, mut ordinary_rx) =
+            channel::<Result<Option<AccountedProtocolFrame>, String>>(4);
+        let (control_tx, mut control_rx) = channel::<AccountedProtocolFrame>(4);
+        let (shutdown_tx, _shutdown_rx) = channel::<wire::ControlFrame>(1);
+        let (overload_tx, _overload_rx) = test_frame_writer(4);
+
+        let cancel = ProtocolFrame::RequestFrame(request_frame(
+            7,
+            vm_ownership("conn-1", "session-1", "vm-1"),
+            RequestPayload::CancelExecutionRequest(wire::CancelExecutionRequest {
+                execution_id: String::from("operation-1-1"),
+            }),
+        ));
+        assert_eq!(
+            route_decoded_combined_frame(
+                test_decoded_frame(cancel),
+                &ordinary_tx,
+                &transport,
+                &control_tx,
+                &shutdown_tx,
+                &overload_tx,
+                &ingress_budget,
+                &control_budget,
+            ),
+            StdinReaderFlow::Continue,
+        );
+
+        assert!(
+            control_rx.try_recv().is_err(),
+            "cancel_execution must not be admitted on the response/control lane"
+        );
+        let Ok(Ok(Some(routed))) = ordinary_rx.try_recv() else {
+            panic!("cancel_execution must be admitted on the stdin request lane");
+        };
+        let ProtocolFrame::RequestFrame(request) = routed.frame else {
+            panic!("the stdin lane must carry the request frame itself");
+        };
+        assert!(
+            matches!(request.payload, RequestPayload::CancelExecutionRequest(_)),
+            "the stdin lane must carry the cancel, not a substitute frame"
+        );
+    }
+
+    /// The emit budget in `service_process_events` is global, so the round's
+    /// starting session must advance — otherwise every session past the cap
+    /// starves permanently once more than `vm_quantum_operations` sessions are
+    /// emitting.
+    #[test]
+    fn event_emission_rounds_start_at_a_rotating_session() {
+        let sessions = (0..3)
+            .map(|index| SessionScope {
+                connection_id: String::from("conn-1"),
+                session_id: format!("session-{index}"),
+            })
+            .collect::<BTreeSet<_>>();
+
+        let starts = (0..4)
+            .map(|rotation| rotated_sessions(&sessions, rotation)[0].session_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(starts, ["session-0", "session-1", "session-2", "session-0"]);
+
+        // Every round still offers every session; only the order shifts.
+        for rotation in 0..4 {
+            assert_eq!(
+                rotated_sessions(&sessions, rotation)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                sessions,
+            );
+        }
+
+        assert!(rotated_sessions(&BTreeSet::new(), 7).is_empty());
     }
 
     #[test]
