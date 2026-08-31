@@ -6926,7 +6926,20 @@ fn builtin_named_exports(module_name: &str) -> &'static [&'static str] {
             "validateHeaderName",
             "validateHeaderValue",
         ],
-        "http2" => &["connect", "createServer", "createSecureServer"],
+        "http2" => &[
+            "Http2ServerRequest",
+            "Http2ServerResponse",
+            "Http2Session",
+            "Http2Stream",
+            "connect",
+            "constants",
+            "createServer",
+            "createSecureServer",
+            "getDefaultSettings",
+            "getPackedSettings",
+            "getUnpackedSettings",
+            "sensitiveHeaders",
+        ],
         "https" => &[
             "Agent",
             "ClientRequest",
@@ -7456,6 +7469,14 @@ mod tests {
     use std::io::BufRead;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
+
+    #[test]
+    fn http2_builtin_exposes_node_compatibility_classes() {
+        let exports = builtin_named_exports("http2");
+        assert!(exports.contains(&"Http2ServerRequest"));
+        assert!(exports.contains(&"Http2ServerResponse"));
+        assert!(exports.contains(&"constants"));
+    }
 
     #[test]
     fn dispose_context_reclaims_one_shot_metadata_without_reusing_ids() {
