@@ -1333,7 +1333,13 @@ function enforceMemoryLimit(moduleBytes, limitPages) {
     throw new Error('module is not a valid WebAssembly binary');
   }
 
-  const rewritten = Array.from(bytes.slice(0, 8));
+  // Every section but the memory section is carried through as a view over the
+  // source module and the result is joined once. The parse and the output bytes
+  // are unchanged; only the copy strategy is. Pushing each byte into a JS number
+  // Array (`appendBytes`) costs ~9.5 ms per MB of module, which made this the
+  // single most expensive stage of launching any large guest binary — the shell
+  // is 3 MB, so every `bash` call paid ~29 ms here.
+  const chunks = [bytes.subarray(0, 8)];
   let offset = 8;
 
   while (offset < bytes.length) {
@@ -1349,19 +1355,20 @@ function enforceMemoryLimit(moduleBytes, limitPages) {
     }
 
     if (sectionId !== 5) {
-      appendBytes(rewritten, bytes.slice(sectionStart, sectionEnd));
+      chunks.push(bytes.subarray(sectionStart, sectionEnd));
       offset = sectionEnd;
       continue;
     }
 
-    const rewrittenSection = rewriteMemorySection(bytes.slice(offset, sectionEnd), limitPages);
-    rewritten.push(sectionId);
-    appendBytes(rewritten, encodeVarUint(rewrittenSection.length));
-    appendBytes(rewritten, rewrittenSection);
+    // `rewriteMemorySection` only reads its argument, so a view is safe here.
+    const rewrittenSection = rewriteMemorySection(bytes.subarray(offset, sectionEnd), limitPages);
+    chunks.push(Uint8Array.of(sectionId));
+    chunks.push(Uint8Array.from(encodeVarUint(rewrittenSection.length)));
+    chunks.push(Uint8Array.from(rewrittenSection));
     offset = sectionEnd;
   }
 
-  return Buffer.from(rewritten);
+  return Buffer.concat(chunks);
 }
 
 function decodeBase64ToUint8Array(value) {
