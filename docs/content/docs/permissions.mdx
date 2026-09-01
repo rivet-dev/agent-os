@@ -77,7 +77,9 @@ To invert it, flip `default` to `"deny"` and allow just one subtree:
 
 ## Allow only specific network hosts
 
-Every non-`fs` scope matches by `patterns` instead of `paths`. For `network`, a pattern is a host (or `host:port`), and the operations are `fetch`, `http`, `dns`, and `listen`.
+Every non-`fs` scope matches by `patterns` instead of `paths`. The operations for `network` are `fetch`, `http`, `dns`, and `listen`.
+
+A `network` pattern is matched against the URI form of the connection, not a bare host: `tcp://<host>:<port>` for `fetch`, `http`, and `listen`, and `dns://<hostname>` for `dns`. Patterns are globs in which a single `*` does not cross `/`, so use `tcp://api.example.com:*` to allow every port on a host, and `tcp://**` to allow every host. A bare `api.example.com` matches nothing.
 
 <CodeSnippet file="examples/permissions/server.ts" region="allow-one-host" />
 
