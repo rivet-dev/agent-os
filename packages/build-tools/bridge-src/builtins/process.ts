@@ -1141,6 +1141,9 @@ function setupGlobals() {
   g.Event = Event;
   g.CustomEvent = CustomEvent;
   g.EventTarget = EventTarget;
+  if (typeof g.DOMException === "undefined") {
+    g.DOMException = SandboxDOMException;
+  }
   if (typeof g.Buffer === "undefined") {
     g.Buffer = Buffer3;
   }
@@ -1161,9 +1164,36 @@ function setupGlobals() {
   installBuiltinUtilFormatWithOptions(builtinUtilModule);
   if (typeof g.atob === "undefined" || typeof g.btoa === "undefined") {
     const base64 = require_base64_js();
+    const createInvalidCharacterError = (message = "Invalid character") => {
+      const error = new g.DOMException(message, "InvalidCharacterError");
+      if (error.code === 0) error.code = 5;
+      return error;
+    };
     if (typeof g.atob === "undefined") {
       g.atob = (value) => {
-        const bytes = base64.toByteArray(String(value));
+        // WHATWG forgiving-base64 decode accepts ASCII whitespace and
+        // unpadded input, but rejects the base64url alphabet. base64-js
+        // implements RFC 4648 section 4 instead, so normalize the input and
+        // reject URL-safe characters before handing it over.
+        const input = String(value).replace(/[\t\n\f\r ]+/g, "");
+        const hasPadding = input.includes("=");
+        if (/[^A-Za-z0-9+/=]/.test(input) || /={3,}/.test(input) || /=[^=]/.test(input)) {
+          throw createInvalidCharacterError();
+        }
+        const remainder = input.length % 4;
+        if (remainder === 1) {
+          throw createInvalidCharacterError("The string to be decoded is not correctly encoded.");
+        }
+        if (hasPadding && remainder !== 0) {
+          throw createInvalidCharacterError();
+        }
+        const normalizedInput = !hasPadding && remainder === 2 ? `${input}==` : !hasPadding && remainder === 3 ? `${input}=` : input;
+        let bytes = new Uint8Array(0);
+        try {
+          bytes = base64.toByteArray(normalizedInput);
+        } catch {
+          throw createInvalidCharacterError();
+        }
         let decoded = "";
         for (const byte of bytes) {
           decoded += String.fromCharCode(byte);
@@ -1178,7 +1208,7 @@ function setupGlobals() {
         for (let index = 0; index < input.length; index += 1) {
           const code = input.charCodeAt(index);
           if (code > 255) {
-            throw new TypeError("Invalid character");
+            throw createInvalidCharacterError();
           }
           bytes[index] = code;
         }
@@ -1194,9 +1224,6 @@ function setupGlobals() {
   }
   if (typeof g.CryptoKey === "undefined") {
     g.CryptoKey = SandboxCryptoKey;
-  }
-  if (typeof g.DOMException === "undefined") {
-    g.DOMException = SandboxDOMException;
   }
   if (typeof g.crypto === "undefined") {
     g.crypto = builtinCryptoModule;
