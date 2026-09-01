@@ -1250,6 +1250,7 @@ const DEFAULT_EGRESS_HOSTS: &[&str] = &[
     "api.openai.com",
     "generativelanguage.googleapis.com",
     "openrouter.ai",
+    "api.orcarouter.ai",
 ];
 
 /// Resource patterns for the default egress allowlist. Network permission
@@ -3886,6 +3887,8 @@ mod tests {
         assert!(patterns.contains(&"dns://api.openai.com".to_string()));
         assert!(patterns.contains(&"dns://generativelanguage.googleapis.com".to_string()));
         assert!(patterns.contains(&"dns://openrouter.ai".to_string()));
+        assert!(patterns.contains(&"dns://api.orcarouter.ai".to_string()));
+        assert!(patterns.contains(&"tcp://api.orcarouter.ai:*".to_string()));
     }
 
     #[test]
