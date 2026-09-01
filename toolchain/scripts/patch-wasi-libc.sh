@@ -123,12 +123,18 @@ if [ "$MODE" = "apply" ] || [ "$MODE" = "check" ]; then
     WASI_LIBC_SRC_DIR="$WORKTREE_DIR"
 fi
 
-# Find patch files
+# Find patch files. Read the list with a plain `read` loop rather than `mapfile`:
+# macOS ships bash 3.2, where `mapfile` does not exist and the sysroot build dies
+# with "mapfile: command not found".
 if [ "$MODE" = "reverse" ]; then
-    mapfile -t PATCH_FILES < <(find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort -r)
+    list_patch_files() { find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort -r; }
 else
-    mapfile -t PATCH_FILES < <(find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort)
+    list_patch_files() { find "$PATCHES_DIR" -name '*.patch' -type f 2>/dev/null | sort; }
 fi
+PATCH_FILES=()
+while IFS= read -r patch_file; do
+    [ -n "$patch_file" ] && PATCH_FILES+=("$patch_file")
+done < <(list_patch_files)
 
 if [ "${#PATCH_FILES[@]}" -eq 0 ]; then
     echo "No patch files found in $PATCHES_DIR"
