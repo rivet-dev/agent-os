@@ -15,6 +15,20 @@ var O_EXCL = 128;
 var O_TRUNC = 512;
 var O_APPEND = 1024;
 var KERNEL_POLLIN = 1;
+// Host stat payloads carry explicit `isDirectory` / `isSymbolicLink` flags that
+// reflect what the VFS actually resolved. Prefer them over the mode bits, which
+// can disagree on backends with stale attribute caches (e.g. NFS/EFS), and fall
+// back to the mode bits when a backend omits the hints.
+function resolveStatFormat(init) {
+  const fmt = init.mode & 61440;
+  const isDir = typeof init.isDirectory === "boolean" ? init.isDirectory : void 0;
+  const isLink = typeof init.isSymbolicLink === "boolean" ? init.isSymbolicLink : void 0;
+  if (isLink === true) return 40960;
+  if (isDir === true) return 16384;
+  if (isDir === false && fmt === 16384) return 32768;
+  if (isLink === false && fmt === 40960) return 32768;
+  return fmt;
+}
 var Stats = class {
   dev;
   ino;
@@ -56,27 +70,31 @@ var Stats = class {
     this.mtime = new Date(this.mtimeMs);
     this.ctime = new Date(this.ctimeMs);
     this.birthtime = new Date(this.birthtimeMs);
+    Object.defineProperty(this, "_typeFormat", {
+      value: resolveStatFormat(init),
+      enumerable: false
+    });
   }
   isFile() {
-    return (this.mode & 61440) === 32768;
+    return this._typeFormat === 32768;
   }
   isDirectory() {
-    return (this.mode & 61440) === 16384;
+    return this._typeFormat === 16384;
   }
   isSymbolicLink() {
-    return (this.mode & 61440) === 40960;
+    return this._typeFormat === 40960;
   }
   isBlockDevice() {
-    return (this.mode & 61440) === 24576;
+    return this._typeFormat === 24576;
   }
   isCharacterDevice() {
-    return (this.mode & 61440) === 8192;
+    return this._typeFormat === 8192;
   }
   isFIFO() {
-    return (this.mode & 61440) === 4096;
+    return this._typeFormat === 4096;
   }
   isSocket() {
-    return (this.mode & 61440) === 49152;
+    return this._typeFormat === 49152;
   }
 };
 var Dirent = class {
