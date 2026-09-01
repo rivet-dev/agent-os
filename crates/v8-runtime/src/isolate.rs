@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex, Once};
 use std::thread;
 
@@ -169,9 +170,9 @@ pub fn prepare_current_thread() {
 
 // Headroom granted to V8 when the near-heap-limit callback fires. V8 fatal-aborts
 // the whole process (SIGTRAP) if the callback does not raise the limit, so we must
-// hand back a larger limit to give the engine room to unwind. Termination has
-// already been requested, so this extra budget only covers propagation of the
-// uncatchable termination exception, not continued guest allocation.
+// hand back a larger limit to give the engine room to unwind, and it also gives a
+// guest that merely peaked at its cap one chance to fall back under it before the
+// isolate is terminated.
 const NEAR_HEAP_LIMIT_HEADROOM_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default per-isolate heap cap applied when the caller passes no explicit limit.
@@ -183,35 +184,65 @@ const NEAR_HEAP_LIMIT_HEADROOM_BYTES: usize = 16 * 1024 * 1024;
 /// isolation semantics; operators may raise it via the configured limit.
 pub const DEFAULT_HEAP_LIMIT_MB: u32 = 128;
 
+/// Per-isolate state behind the near-heap-limit callback's `data` pointer.
+struct HeapLimitGuard {
+    /// Thread-safe handle used to terminate this very isolate.
+    handle: v8::IsolateHandle,
+    /// Set once the callback has already raised this isolate's limit by
+    /// [`NEAR_HEAP_LIMIT_HEADROOM_BYTES`].
+    headroom_granted: AtomicBool,
+}
+
+/// True when the guest must be terminated: the headroom was already granted for
+/// this isolate and the heap reached the raised limit anyway.
+fn heap_guard_should_terminate(headroom_granted: &AtomicBool) -> bool {
+    headroom_granted.swap(true, Ordering::SeqCst)
+}
+
 /// Invoked by V8 when heap usage approaches the configured limit. Instead of
-/// letting V8 fatal-abort the (process-global) runtime, request termination of the
-/// offending isolate and return a raised limit so V8 can propagate the uncatchable
-/// termination exception cleanly. `data` is a leaked `Box<v8::IsolateHandle>` for
-/// the isolate this callback was registered on.
+/// letting V8 fatal-abort the (process-global) runtime, raise the limit and — for
+/// a guest that cannot fit inside that headroom — terminate the offending isolate.
+/// `data` is a leaked `Box<HeapLimitGuard>` for the isolate this callback was
+/// registered on.
+///
+/// The first callback is NOT a termination. V8 raises it as soon as a full GC
+/// cannot fit the live set under the cap, which a healthy guest sitting at its
+/// high-water mark reaches without being a heap bomb. Terminating there kills
+/// guest JS mid-frame: the termination exception is uncatchable, skips `finally`,
+/// and — outside an `Execute` that would cancel it — leaves the isolate in the
+/// terminating state, where every later guest callback silently returns nothing.
+/// A session in that state does not fail; it goes idle forever. So grant the
+/// headroom first and terminate only if the heap reaches the raised limit too,
+/// which keeps the guest bounded at `limit + NEAR_HEAP_LIMIT_HEADROOM_BYTES`.
 extern "C" fn near_heap_limit_callback(
     data: *mut c_void,
     current_heap_limit: usize,
     initial_heap_limit: usize,
 ) -> usize {
-    if !data.is_null() {
-        // Safety: `data` is the pointer produced by `Box::into_raw` in
-        // `install_heap_limit_guard` and lives for the entire lifetime of the
-        // isolate.
-        let handle = unsafe { &*(data as *const v8::IsolateHandle) };
-        // Terminate any JS currently running on this isolate. This unwinds the
-        // guest with an uncatchable exception rather than crashing the process.
-        handle.terminate_execution();
+    // Never shrink below the current limit: V8 fatal-aborts if this callback
+    // hands back a limit the heap is already over.
+    let raised = current_heap_limit
+        .max(initial_heap_limit)
+        .saturating_add(NEAR_HEAP_LIMIT_HEADROOM_BYTES);
+    if data.is_null() {
+        return raised;
     }
+    // Safety: `data` is the pointer produced by `Box::into_raw` in
+    // `install_heap_limit_guard` and lives for the entire lifetime of the
+    // isolate.
+    let guard = unsafe { &*(data as *const HeapLimitGuard) };
+    if !heap_guard_should_terminate(&guard.headroom_granted) {
+        return raised;
+    }
+    // Terminate any JS currently running on this isolate. This unwinds the
+    // guest with an uncatchable exception rather than crashing the process.
+    guard.handle.terminate_execution();
     warn_limit_exhausted(
         TrackedLimit::V8HeapBytes,
         current_heap_limit,
         initial_heap_limit.max(1),
     );
-    // Grant headroom so V8 does not immediately fatal-abort before the termination
-    // takes effect. We never shrink below the current limit.
-    current_heap_limit
-        .max(initial_heap_limit)
-        .saturating_add(NEAR_HEAP_LIMIT_HEADROOM_BYTES)
+    raised
 }
 
 /// Register the near-heap-limit OOM guard on an isolate that was created with a
@@ -223,11 +254,14 @@ extern "C" fn near_heap_limit_callback(
 /// regardless of whether it was built fresh or restored from a snapshot.
 pub fn install_heap_limit_guard(isolate: &mut v8::OwnedIsolate) {
     // The callback needs a thread-safe handle to request termination of this very
-    // isolate. The handle is leaked so it outlives the callback registration; the
+    // isolate. The guard is leaked so it outlives the callback registration; the
     // number of isolates per process is bounded, so this is not an unbounded leak,
     // and the memory is reclaimed when the process exits.
-    let handle = Box::new(isolate.thread_safe_handle());
-    let data = Box::into_raw(handle) as *mut c_void;
+    let guard = Box::new(HeapLimitGuard {
+        handle: isolate.thread_safe_handle(),
+        headroom_granted: AtomicBool::new(false),
+    });
+    let data = Box::into_raw(guard) as *mut c_void;
     isolate.add_near_heap_limit_callback(near_heap_limit_callback, data);
 }
 
@@ -276,3 +310,21 @@ pub fn create_context(isolate: &mut v8::OwnedIsolate) -> v8::Global<v8::Context>
 
 // V8 lifecycle tests are consolidated in execution::tests to avoid
 // inter-test SIGSEGV from V8 global state issues.
+
+#[cfg(test)]
+mod tests {
+    use super::{heap_guard_should_terminate, AtomicBool};
+
+    /// The first near-heap-limit callback must only raise the limit. Terminating
+    /// there kills a guest that merely peaked at its cap, and a termination that
+    /// lands outside an `Execute` is never cancelled: the isolate then answers
+    /// every guest callback with nothing and the session idles forever instead of
+    /// failing.
+    #[test]
+    fn heap_guard_grants_headroom_once_before_terminating() {
+        let headroom_granted = AtomicBool::new(false);
+        assert!(!heap_guard_should_terminate(&headroom_granted));
+        assert!(heap_guard_should_terminate(&headroom_granted));
+        assert!(heap_guard_should_terminate(&headroom_granted));
+    }
+}

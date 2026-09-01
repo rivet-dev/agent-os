@@ -2154,20 +2154,26 @@ impl SocketReadinessSubscribers {
             .any(|subscriber| subscriber.application_read_interest))
     }
 
-    fn unregister(&self, identity: (u64, u64)) -> bool {
+    /// Drop one alias' subscription, returning the remaining aggregate read
+    /// interest and the removed target so the caller can also retire the
+    /// capability in that VM's readiness broker.
+    fn unregister(&self, identity: (u64, u64)) -> (bool, Option<JavascriptSocketEventPusher>) {
         self.subscribers
             .lock()
             .map(|mut subscribers| {
-                subscribers.remove(&identity);
-                subscribers
-                    .values()
-                    .any(|subscriber| subscriber.application_read_interest)
+                let removed = subscribers.remove(&identity);
+                (
+                    subscribers
+                        .values()
+                        .any(|subscriber| subscriber.application_read_interest),
+                    removed.map(|subscriber| subscriber.target),
+                )
             })
             .unwrap_or_else(|_| {
                 eprintln!(
                     "ERR_AGENTOS_READY_STATE_POISONED: socket readiness subscriber lock poisoned"
                 );
-                false
+                (false, None)
             })
     }
 
@@ -2351,8 +2357,23 @@ impl Drop for SocketReadinessRegistration {
             .unwrap_or_else(|error| error.into_inner())
             .take();
         if let Some(identity) = identity {
-            let aggregate = self.subscribers.unregister(identity);
+            let (aggregate, removed) = self.subscribers.unregister(identity);
             self.update_aggregate_interest(aggregate);
+            // The guest calls `unregisterCapabilityReadiness` on the same
+            // teardown, so its dispatch target is gone. Retire the capability
+            // in the broker too: level flags left behind have no reachable
+            // guest target and keep the session's wake lane armed.
+            if let Some(target) = removed {
+                if let Err(error) = target
+                    .session
+                    .remove_readiness(target.capability_id, target.capability_generation)
+                {
+                    eprintln!(
+                        "ERR_AGENTOS_NET_SOCKET_READY_REMOVE: capability={} generation={} teardown: {error}",
+                        target.capability_id, target.capability_generation
+                    );
+                }
+            }
         }
     }
 }
@@ -3428,5 +3449,40 @@ mod socket_readiness_registry_tests {
 
         drop(parent);
         assert!(subscribers.targets().is_empty());
+    }
+
+    #[test]
+    fn alias_teardown_surfaces_its_capability_for_broker_removal() {
+        let process_runtime =
+            agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+                .expect("create teardown test runtime");
+        let resources = ResourceLedger::root(
+            "socket-teardown-test",
+            [(
+                ResourceClass::Capabilities,
+                ResourceLimit::new(2, "limits.reactor.maxCapabilities"),
+            )],
+        );
+        let host =
+            V8RuntimeHost::spawn(&process_runtime.context()).expect("spawn teardown test V8 host");
+        let session = host.session_handle(String::from("socket-teardown-test"));
+        let subscribers = SocketReadinessSubscribers::new(&resources);
+        subscribers
+            .register(None, javascript_target(&session, 7))
+            .expect("register alias");
+
+        let (aggregate, removed) = subscribers.unregister((7, 1));
+        assert!(!aggregate);
+        let removed = removed.expect(
+            "teardown must surface the target so its capability can be retired in the broker",
+        );
+        assert_eq!(
+            (removed.capability_id, removed.capability_generation),
+            (7, 1)
+        );
+        assert!(
+            subscribers.unregister((7, 1)).1.is_none(),
+            "a repeated teardown must not retire the capability twice"
+        );
     }
 }

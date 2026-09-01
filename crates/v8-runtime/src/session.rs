@@ -67,6 +67,11 @@ struct SessionReadiness {
     broker: RuntimeSessionReadyBroker,
     wakes: Mutex<SessionReadyWakeState>,
     executor_wake_tx: Sender<ReadyWake>,
+    /// Capability identities whose last guest dispatch found no registered
+    /// target, keyed to the revision that missed. Entries are dropped on
+    /// delivery, on acknowledgement and on capability removal, so this holds at
+    /// most the capabilities currently between two readiness wakes.
+    target_misses: Mutex<HashMap<(u64, u64), u64>>,
 }
 
 impl SessionReadiness {
@@ -94,6 +99,7 @@ impl SessionReadiness {
                 broker,
                 wakes: Mutex::new(SessionReadyWakeState { runtime_wake_rx }),
                 executor_wake_tx,
+                target_misses: Mutex::new(HashMap::new()),
             }),
             executor_wake_rx,
         ))
@@ -113,6 +119,7 @@ impl SessionReadiness {
                 broker,
                 wakes: Mutex::new(SessionReadyWakeState { runtime_wake_rx }),
                 executor_wake_tx,
+                target_misses: Mutex::new(HashMap::new()),
             }),
             executor_wake_rx,
         ))
@@ -144,6 +151,7 @@ impl SessionReadiness {
     }
 
     fn remove(&self, capability_id: u64, capability_generation: u64) -> Result<(), String> {
+        self.forget_target_misses((capability_id, capability_generation));
         self.broker
             .remove_capability(self.generation, capability_id, capability_generation)
             .map_err(|error| error.to_string())
@@ -212,6 +220,51 @@ impl SessionReadiness {
         self.broker
             .drain_timers(batch.generation, batch.epoch, self.max_batch_handles)
             .map_err(|error| error.to_string())
+    }
+
+    /// Record one guest dispatch outcome, appending the observation to
+    /// `delivered` when the broker must clear its level flags for it.
+    ///
+    /// A missing guest target gets exactly one free retry, which covers the
+    /// genuine race this tolerates: readiness published before the guest
+    /// finished registering its capability resolves within a single wake. The
+    /// broker is level-triggered, so an observation that is never acknowledged
+    /// keeps `complete_wake` rearming immediately, and a target that will never
+    /// appear — teardown already unregistered it, or its generation is
+    /// permanently stale — spins the session at full CPU without ever reaching
+    /// a turn boundary. Acknowledging the second consecutive miss of the same
+    /// revision clears the flags and lets the loop idle. A capability that
+    /// registers afterwards still receives delivery: new data bumps the
+    /// revision and republishes readiness.
+    fn record_dispatch_outcome(
+        &self,
+        entry: &ReadyObservation,
+        delivered_to_guest: bool,
+        delivered: &mut Vec<ReadyObservation>,
+    ) {
+        let identity = (entry.capability_id, entry.capability_generation);
+        // Advisory bookkeeping: a poisoned lock must not fail the readiness
+        // turn, and recovering the map only costs one extra retry.
+        let mut misses = self
+            .target_misses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if delivered_to_guest {
+            misses.remove(&identity);
+            delivered.push(*entry);
+            return;
+        }
+        if misses.insert(identity, entry.revision) == Some(entry.revision) {
+            misses.remove(&identity);
+            delivered.push(*entry);
+        }
+    }
+
+    fn forget_target_misses(&self, identity: (u64, u64)) {
+        self.target_misses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&identity);
     }
 
     fn complete_batch(
@@ -3668,17 +3721,31 @@ fn dispatch_ready_batch_callbacks(
             entry.flags,
         );
         tc.perform_microtask_checkpoint();
+        // An out-of-band termination (the near-heap-limit guard) makes every
+        // guest call return nothing, which is indistinguishable from a missing
+        // target here. Reporting it as one would retire the capability's level
+        // flags against an isolate that can no longer run any JavaScript, and
+        // the session would idle forever instead of failing. Surface it as the
+        // termination it is; the caller cancels it and reports the execution.
+        if tc.has_terminated() {
+            return EventLoopStatus::Terminated;
+        }
         if let Some(exception) = tc.exception() {
             let (code, error) = execution::exception_to_result(tc, exception);
             return EventLoopStatus::Failed(code, error);
         }
         match dispatch {
-            crate::stream::ReadinessDispatch::Delivered => delivered.push(*entry),
+            crate::stream::ReadinessDispatch::Delivered => {
+                ready_broker.record_dispatch_outcome(entry, true, delivered);
+            }
             crate::stream::ReadinessDispatch::TargetMissing => {
                 // The bridge exists but this capability may not be registered
-                // yet (for example, readiness raced the connect response).
-                // Leave the observation unacknowledged so the durable
-                // sidecar state schedules another coalesced wake.
+                // yet (for example, readiness raced the connect response). The
+                // first miss stays unacknowledged so the durable sidecar state
+                // schedules another coalesced wake; the second is acknowledged
+                // so the level-triggered broker cannot rearm forever against a
+                // target that will never appear.
+                ready_broker.record_dispatch_outcome(entry, false, delivered);
             }
             crate::stream::ReadinessDispatch::BridgeMissing => {
                 return EventLoopStatus::Failed(
@@ -3927,6 +3994,7 @@ fn dispatch_event_loop_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentos_runtime::metrics::WakeMetric;
     use std::collections::HashSet;
 
     const TEST_READY_BATCH_HANDLES: usize = 64;
@@ -4605,6 +4673,76 @@ mod tests {
         assert_eq!(
             broker.broker.pending_handle_count().expect("pending count"),
             0
+        );
+    }
+
+    /// Regression test for the readiness livelock: a capability whose guest
+    /// dispatch target is missing must not rearm the level-triggered broker
+    /// forever. Drives the same bookkeeping `dispatch_ready_batch_callbacks`
+    /// uses, without a V8 isolate, and asserts the wake counters stop growing.
+    #[test]
+    fn missing_readiness_target_stops_rearming_after_one_free_retry() {
+        let mgr = test_manager(1);
+        let metrics = mgr.runtime.metrics().clone();
+        let wake_count = || {
+            let snapshot = metrics.snapshot();
+            snapshot.wakes[WakeMetric::Delivered.index()]
+                + snapshot.wakes[WakeMetric::Rearmed.index()]
+        };
+        let (broker, wake_rx) = SessionReadiness::new(41, &mgr.runtime, TEST_READY_BATCH_HANDLES)
+            .expect("create session readiness");
+        broker
+            .publish(77, 5, ReadyFlags::READABLE)
+            .expect("publish readiness with no guest target registered");
+
+        let mut turns = 0;
+        while let Ok(wake) = wake_rx.try_recv() {
+            let batch = broker.take_batch(wake).expect("readiness batch");
+            let mut delivered = Vec::new();
+            for entry in &batch.entries {
+                broker.record_dispatch_outcome(entry, false, &mut delivered);
+            }
+            broker
+                .complete_batch(&batch, &delivered)
+                .expect("complete readiness wake");
+            turns += 1;
+            assert!(
+                turns <= 8,
+                "an unacknowledgeable readiness observation rearmed without bound"
+            );
+        }
+        assert_eq!(turns, 2, "a missing target gets exactly one free retry");
+        assert_eq!(
+            broker.broker.pending_handle_count().expect("pending count"),
+            0,
+            "the bounded miss must clear the retained level flags"
+        );
+
+        let bounded = wake_count();
+        assert!(wake_rx.try_recv().is_err(), "the wake lane must go quiet");
+        assert_eq!(wake_count(), bounded, "wake metrics must stop growing");
+
+        // A capability that registers afterwards still receives delivery: new
+        // data bumps the revision and republishes readiness.
+        broker
+            .publish(77, 5, ReadyFlags::READABLE)
+            .expect("republish readiness after the guest registered its target");
+        let wake = wake_rx
+            .try_recv()
+            .expect("republished readiness must wake the session");
+        let batch = broker.take_batch(wake).expect("post-registration batch");
+        let mut delivered = Vec::new();
+        for entry in &batch.entries {
+            broker.record_dispatch_outcome(entry, true, &mut delivered);
+        }
+        assert_eq!(delivered, batch.entries);
+        broker
+            .complete_batch(&batch, &delivered)
+            .expect("acknowledge delivered readiness");
+        assert!(wake_rx.try_recv().is_err());
+        assert!(
+            wake_count() > bounded,
+            "delivery must resume once the guest target exists"
         );
     }
 
