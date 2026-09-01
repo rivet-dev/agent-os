@@ -82,6 +82,7 @@ pub enum TrackedLimit {
     PendingWasmSignals,
     PendingSidecarResponses,
     OutboundSidecarRequests,
+    GuestExecutions,
     VmProcesses,
     VmOpenFds,
     VmPipes,
@@ -119,6 +120,7 @@ impl TrackedLimit {
             TrackedLimit::PendingWasmSignals => "pending_wasm_signals",
             TrackedLimit::PendingSidecarResponses => "pending_sidecar_responses",
             TrackedLimit::OutboundSidecarRequests => "outbound_sidecar_requests",
+            TrackedLimit::GuestExecutions => "guest_executions",
             TrackedLimit::VmProcesses => "vm_processes",
             TrackedLimit::VmOpenFds => "vm_open_fds",
             TrackedLimit::VmPipes => "vm_pipes",
@@ -154,7 +156,8 @@ impl TrackedLimit {
             | TrackedLimit::PendingWasmSignals
             | TrackedLimit::PendingSidecarResponses
             | TrackedLimit::OutboundSidecarRequests => LimitCategory::Queue,
-            TrackedLimit::VmProcesses
+            TrackedLimit::GuestExecutions
+            | TrackedLimit::VmProcesses
             | TrackedLimit::VmOpenFds
             | TrackedLimit::VmPipes
             | TrackedLimit::VmPtys
