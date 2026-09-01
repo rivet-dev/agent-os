@@ -39,6 +39,10 @@ const INLINE_FILE_PATH_ENV: &str = "AGENTOS_INLINE_FILE_PATH";
 const USE_BUNDLED_TYPESCRIPT_ENV: &str = "AGENTOS_USE_BUNDLED_TYPESCRIPT";
 const SEMANTIC_RESULT_PATH_PREFIX: &str = "/tmp/.agentos-semantic-result-";
 
+/// Monotonic suffix for minted public execution ids. Process-wide so ids stay
+/// unique across every VM this sidecar hosts, not merely within one VM.
+static NEXT_PUBLIC_EXECUTION_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug)]
 struct LoweredOperation {
     identity: ExecutionIdentityOptions,
@@ -1466,9 +1470,15 @@ where
                         execution_id
                     }
                     None => loop {
-                        vm.next_public_execution_id = vm.next_public_execution_id.saturating_add(1);
-                        let candidate =
-                            format!("operation-{now:x}-{:x}", vm.next_public_execution_id);
+                        // Process-wide, not per-VM. One sidecar process fans out to
+                        // many VMs whose events reach the host over a single shared
+                        // client that routes execution events by id alone, so a
+                        // per-VM counter makes K VMs mint the identical
+                        // `operation-{ms}-1` in the same millisecond and cross-talk.
+                        let candidate = format!(
+                            "operation-{now:x}-{:x}",
+                            NEXT_PUBLIC_EXECUTION_ID.fetch_add(1, Ordering::Relaxed)
+                        );
                         if !vm.executions.contains_key(&candidate) {
                             break candidate;
                         }

@@ -6016,6 +6016,19 @@ export class AgentOs {
 			? T
 			: never,
 	): void {
+		// Every AgentOs sharing a sidecar handle listens on the SAME native
+		// process, so this callback sees every tenant VM's events. Execution ids
+		// are only unique within a VM, so dispatching on the id alone leaks
+		// another VM's stdout/exit into this instance. Drop foreign vm-scoped
+		// events here — before the mappers, which discard `ownership` — so every
+		// downstream id-keyed lookup below is automatically VM-local. Session-
+		// and connection-scoped events are not VM-specific and pass through.
+		if (
+			event.ownership.scope === "vm" &&
+			event.ownership.vm_id !== this._sidecarVm.vmId
+		) {
+			return;
+		}
 		if (event.payload.type === "execution_output") {
 			const output = mapExecutionOutputEvent(event.payload.event);
 			const pid = this._languageProcessIds.get(output.executionId);

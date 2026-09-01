@@ -992,7 +992,6 @@ where
                 next_vm_fetch_stream_id: 0,
                 executions: BTreeMap::new(),
                 execution_processes: BTreeMap::new(),
-                next_public_execution_id: 0,
                 execution_retention_wake_deadline_ms: None,
                 execution_retention_wake_task: None,
                 package_mutation_execution_id: None,
