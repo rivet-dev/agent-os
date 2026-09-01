@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # patch-std.sh — Apply wasmVM patches to the Rust std source tree
 #
 # Patches modify the WASI platform implementation in std to support

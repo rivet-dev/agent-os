@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Build the libc++/libc++abi/libunwind runtime set ourselves so C++ exception
@@ -19,9 +19,11 @@ WASI_NM="$WASI_SDK_DIR/bin/llvm-nm"
 
 if [ -d "$PATCH_DIR" ]; then
   while IFS= read -r patch_file; do
-    if patch --dry-run -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
-      patch --no-backup-if-mismatch -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null
-    elif patch --dry-run -R -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
+    # -f/--force avoids a prompt some non-GNU patch impls (e.g. BSD/Apple
+    # patch) answer non-deterministically in non-interactive use.
+    if patch --dry-run -f -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
+      patch --no-backup-if-mismatch -f -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null
+    elif patch --dry-run -R -f -p1 -d "$LLVM_PROJECT_SRC_DIR" < "$patch_file" >/dev/null 2>&1; then
       :
     else
       echo "failed to apply llvm-project patch: $patch_file" >&2

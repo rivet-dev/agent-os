@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # build-codex-wasip1.sh — reproduce the codex-core wasm32-wasip1 build frontier.
 #
 # Captures every fix discovered while driving `cargo build -p codex-core

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # patch-vendor.sh — Apply crate-level patches to vendored dependencies
 #
 # Iterates std-patches/crates/<crate-name>/*.patch, finds the matching
