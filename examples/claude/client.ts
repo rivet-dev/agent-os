@@ -92,6 +92,44 @@ async function withMcp() {
 	// docs:end mcp
 }
 
+// ── Persisted sessions ────────────────────────────────────────────
+//
+// Claude Code writes every session to `CLAUDE_CONFIG_DIR` (default
+// `/home/agentos/.claude`). That directory lives on durable VM storage, so a
+// session opened before a VM restart can be resumed after it with the SDK's
+// native resume rather than a transcript replay.
+async function resumeAcrossRestart() {
+	// docs:start resume
+	// Keep CLAUDE_CONFIG_DIR under /home/agentos so the session file survives
+	// VM restarts. This is the default; set it explicitly only to relocate it.
+	const sessionId = "assistant";
+	await agent.sessions.open({
+		sessionId,
+		agent: "claude",
+		env: {
+			ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
+			CLAUDE_CONFIG_DIR: "/home/agentos/.claude",
+		},
+	});
+
+	await agent.sessions.prompt({
+		sessionId,
+		content: [
+			{ type: "text", text: "Remember that my favorite color is teal." },
+		],
+	});
+
+	// Later, after the VM has slept or restarted, prompt the same session id.
+	// agentOS restores it through ACP `session/resume`, which runs
+	// `claude --resume <sessionId>` against the persisted session file.
+	const result = await agent.sessions.prompt({
+		sessionId,
+		content: [{ type: "text", text: "What is my favorite color?" }],
+	});
+	console.log(result.message?.content ?? []);
+	// docs:end resume
+}
+
 // ── Skills + MCP together ─────────────────────────────────────────
 async function withSkillAndMcp() {
 	const skill = `---
@@ -146,4 +184,4 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 	console.log(result.message?.content ?? []);
 }
 
-export { quickStart, withSkill, withMcp, withSkillAndMcp };
+export { quickStart, withSkill, withMcp, resumeAcrossRestart, withSkillAndMcp };

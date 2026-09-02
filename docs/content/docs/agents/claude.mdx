@@ -43,6 +43,16 @@ Expose extra tools to the agent by passing `mcpServers` to `openSession`. Both l
 **Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
 </Note>
 
+## Persisting sessions across VM restarts
+
+Session persistence is enabled for the packaged Claude Code agent. Claude Code writes each session to `CLAUDE_CONFIG_DIR`, which defaults to `/home/agentos/.claude`. The `/home/agentos` directory lives on the VM's durable storage, so persisted sessions survive VM sleep and restarts without extra configuration. Read [Persistence](/agentos/docs/persistence) for what the VM keeps across restarts.
+
+When you prompt a session whose agent process is no longer running, agentOS restores it with the native ACP `session/resume` request. The adapter forwards that to the Claude Agent SDK's `resume` option, which runs `claude --resume <sessionId>` against the persisted session file, so the resumed session keeps its full state: conversation context, tool results, and compaction. The transcript preamble described in [Sessions](/agentos/docs/sessions#restoration) is used only when the persisted session file cannot be found. The adapter does not disable persistence and does not set `CLAUDE_CODE_SKIP_INITIAL_MESSAGES`, so the resumed session replays correctly.
+
+<CodeSnippet file="examples/claude/client.ts" title="client.ts" region="resume" />
+
+If you override `CLAUDE_CONFIG_DIR`, keep it under `/home/agentos` or another durable mount. Paths under `/tmp` or in-memory mounts are cleared on restart, and the resume then fails with a resource-not-found error. The session's `env` and `cwd` are stored with the session and replayed on restore, so the override applies to the resumed process too.
+
 ## Customizing the agent
 
 Claude Code is a built-in agent, but it's just a software package under the hood. To ship your own ACP adapter, swap the underlying agent SDK, or register a tweaked build as a new agent, see [Custom Agents](/agentos/docs/agents/custom).

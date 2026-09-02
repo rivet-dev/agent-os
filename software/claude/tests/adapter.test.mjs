@@ -1,9 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
 import { Readable, Writable } from "node:stream";
-import { resolve as resolvePath } from "node:path";
 import {
 	ClientSideConnection,
 	PROTOCOL_VERSION,
@@ -71,6 +74,39 @@ async function withAdapter(run, extraEnv = {}) {
 			`Claude ACP exited unexpectedly: ${stderr}`,
 		);
 	}
+}
+
+/** Recursively collect every `<sessionId>.jsonl` Claude Code wrote under `dir`. */
+function findPersistedSessionFiles(dir, sessionId) {
+	let entries;
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	}
+	return entries.flatMap((entry) => {
+		const path = join(dir, entry.name);
+		if (entry.isDirectory()) return findPersistedSessionFiles(path, sessionId);
+		return entry.name === `${sessionId}.jsonl` ? [path] : [];
+	});
+}
+
+/** Flatten an LLMock-normalized chat message into its text fragments. */
+function messageTexts(message) {
+	if (typeof message.content === "string") return [message.content];
+	if (!Array.isArray(message.content)) return [];
+	return message.content.flatMap((part) =>
+		typeof part?.text === "string" ? [part.text] : [],
+	);
+}
+
+async function initialize(connection) {
+	return await connection.initialize({
+		protocolVersion: PROTOCOL_VERSION,
+		clientCapabilities: {},
+		clientInfo: { name: "agentos-test", version: "0.0.1" },
+	});
 }
 
 test("published Claude Agent ACP command initializes over stdio", async () => {
@@ -237,5 +273,143 @@ test("published Claude Agent ACP prompts a second process while the first remain
 		);
 	} finally {
 		await mock.stop();
+	}
+});
+
+test("published Claude Agent ACP resumes a persisted session natively after its adapter process restarts", async () => {
+	// The packaged agent keeps Claude Code's session directory on durable
+	// storage (`CLAUDE_CONFIG_DIR`, `/home/agentos/.claude` by default). agentOS
+	// restores a session after a VM restart with ACP `session/resume`, which the
+	// adapter maps onto the SDK `resume` option: Claude Code reloads its own
+	// persisted session file, so the resumed turn carries the prior context
+	// without any transcript being re-sent by agentOS.
+	const configDir = mkdtempSync(join(tmpdir(), "agentos-claude-config-"));
+	const mock = new LLMock({ port: 0, logLevel: "silent" });
+	mock.addFixtures([
+		{
+			match: { userMessage: "Reply with resume-first" },
+			response: { content: "resume-first" },
+		},
+		{
+			match: { userMessage: "Reply with resume-second" },
+			response: { content: "resume-second" },
+		},
+	]);
+	const baseUrl = await mock.start();
+	const env = { ANTHROPIC_BASE_URL: baseUrl, CLAUDE_CONFIG_DIR: configDir };
+	try {
+		const sessionId = await withAdapter(async (connection) => {
+			await initialize(connection);
+			const session = await connection.newSession({
+				cwd: packageDir,
+				mcpServers: [],
+			});
+			const first = await connection.prompt({
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "Reply with resume-first" }],
+			});
+			assert.equal(first.stopReason, "end_turn");
+			return session.sessionId;
+		}, env);
+
+		// Session persistence is on by default: Claude Code wrote the session
+		// file under CLAUDE_CONFIG_DIR before its adapter process exited.
+		const persisted = findPersistedSessionFiles(
+			join(configDir, "projects"),
+			sessionId,
+		);
+		assert.equal(
+			persisted.length,
+			1,
+			`expected one persisted session file for ${sessionId} under ${configDir}`,
+		);
+
+		const requestsBeforeResume = mock.getRequests().length;
+		await withAdapter(async (connection) => {
+			await initialize(connection);
+			const resumed = await connection.resumeSession({
+				sessionId,
+				cwd: packageDir,
+				mcpServers: [],
+			});
+			assert.ok(
+				resumed.configOptions?.some((option) => option.id === "model"),
+				"resumed session must expose the model config option",
+			);
+			assert.ok(
+				resumed.configOptions?.some((option) => option.id === "effort"),
+				"resumed session must expose the agentOS effort config option",
+			);
+			const second = await connection.prompt({
+				sessionId,
+				prompt: [{ type: "text", text: "Reply with resume-second" }],
+			});
+			assert.equal(second.stopReason, "end_turn");
+		}, env);
+
+		const resumedTurn = mock
+			.getRequests()
+			.slice(requestsBeforeResume)
+			.map((entry) => entry.body?.messages ?? [])
+			.find((messages) =>
+				messages.some(
+					(message) =>
+						message.role === "user" &&
+						messageTexts(message).some((text) =>
+							text.includes("Reply with resume-second"),
+						),
+				),
+			);
+		assert.ok(resumedTurn, "the resumed prompt must reach the model");
+		const priorUser = resumedTurn.filter(
+			(message) =>
+				message.role === "user" &&
+				messageTexts(message).some((text) =>
+					text.includes("Reply with resume-first"),
+				),
+		);
+		const priorAssistant = resumedTurn.filter(
+			(message) =>
+				message.role === "assistant" &&
+				messageTexts(message).some((text) => text.includes("resume-first")),
+		);
+		assert.equal(
+			priorUser.length,
+			1,
+			"native resume must restore the prior user turn from the persisted session file",
+		);
+		assert.equal(
+			priorAssistant.length,
+			1,
+			"native resume must restore the prior assistant turn from the persisted session file",
+		);
+	} finally {
+		await mock.stop();
+		rmSync(configDir, { recursive: true, force: true });
+	}
+});
+
+test("published Claude Agent ACP reports a session missing from CLAUDE_CONFIG_DIR as resource not found", async () => {
+	// A session directory that did not survive the restart must surface the ACP
+	// resource-not-found error so agentOS can take its documented fallback path
+	// instead of silently starting an unrelated session.
+	const configDir = mkdtempSync(join(tmpdir(), "agentos-claude-config-"));
+	try {
+		await withAdapter(async (connection) => {
+			await initialize(connection);
+			await assert.rejects(
+				connection.resumeSession({
+					sessionId: randomUUID(),
+					cwd: packageDir,
+					mcpServers: [],
+				}),
+				(error) => {
+					assert.equal(error.code, -32002, `unexpected error: ${error.message}`);
+					return true;
+				},
+			);
+		}, { CLAUDE_CONFIG_DIR: configDir });
+	} finally {
+		rmSync(configDir, { recursive: true, force: true });
 	}
 });
