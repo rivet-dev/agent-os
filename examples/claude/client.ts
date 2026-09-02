@@ -92,6 +92,24 @@ async function withMcp() {
 	// docs:end mcp
 }
 
+// ── Disallowing built-in tools ────────────────────────────────────
+//
+// Some built-in Claude Code tools cannot work in every deployment. `WebFetch`
+// is useless behind a network policy that blocks egress, for example. Naming
+// them keeps the tools out of the model's context instead of letting it retry
+// calls that always fail.
+async function withoutWebTools() {
+	// docs:start disallowed-tools
+	await agent.sessions.open({
+		agent: "claude",
+		env: {
+			ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
+			ACP_DISALLOWED_TOOLS: "WebFetch,WebSearch",
+		},
+	});
+	// docs:end disallowed-tools
+}
+
 // ── Skills + MCP together ─────────────────────────────────────────
 async function withSkillAndMcp() {
 	const skill = `---
@@ -146,4 +164,4 @@ Write commit messages in the imperative mood and keep the subject under 50 chara
 	console.log(result.message?.content ?? []);
 }
 
-export { quickStart, withSkill, withMcp, withSkillAndMcp };
+export { quickStart, withSkill, withMcp, withoutWebTools, withSkillAndMcp };

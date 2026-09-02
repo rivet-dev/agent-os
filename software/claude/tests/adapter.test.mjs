@@ -10,6 +10,11 @@ import {
 	ndJsonStream,
 } from "@agentclientprotocol/sdk";
 import { LLMock } from "@copilotkit/llmock";
+import {
+	DISALLOWED_TOOLS_ENV,
+	parseDisallowedTools,
+	withDisallowedTools,
+} from "../dist/disallowed-tools.js";
 
 const packageDir = resolvePath(import.meta.dirname, "..");
 const adapterPath = resolvePath(packageDir, "dist", "adapter.js");
@@ -238,4 +243,124 @@ test("published Claude Agent ACP prompts a second process while the first remain
 	} finally {
 		await mock.stop();
 	}
+});
+
+test("parses the disallowed-tools launch contract in both accepted forms", () => {
+	assert.deepEqual(parseDisallowedTools(undefined), []);
+	assert.deepEqual(parseDisallowedTools("  "), []);
+	assert.deepEqual(parseDisallowedTools("WebFetch, WebSearch ,WebFetch"), [
+		"WebFetch",
+		"WebSearch",
+	]);
+	assert.deepEqual(parseDisallowedTools('["WebFetch", "Bash(git commit:*)"]'), [
+		"WebFetch",
+		"Bash(git commit:*)",
+	]);
+});
+
+test("rejects a malformed disallowed-tools value instead of ignoring it", () => {
+	for (const value of [",,,", "[", '["WebFetch", 3]', '["  "]', '{"a":1}']) {
+		assert.throws(
+			() => parseDisallowedTools(value),
+			(error) => error.message.includes(DISALLOWED_TOOLS_ENV),
+			`expected ${value} to fail with a named error`,
+		);
+	}
+});
+
+test("merges the launch contract into caller-supplied session meta", () => {
+	const params = {
+		cwd: "/home/agentos",
+		_meta: { claudeCode: { options: { disallowedTools: ["Bash"], model: "x" } } },
+	};
+	const merged = withDisallowedTools(params, ["WebFetch", "Bash"]);
+
+	assert.deepEqual(merged._meta.claudeCode.options.disallowedTools, [
+		"Bash",
+		"WebFetch",
+	]);
+	assert.equal(merged._meta.claudeCode.options.model, "x");
+	assert.equal(merged.cwd, "/home/agentos");
+	assert.deepEqual(params._meta.claudeCode.options.disallowedTools, ["Bash"]);
+	assert.equal(withDisallowedTools(params, []), params);
+});
+
+test("published Claude Agent ACP withholds disallowed built-in tools from the model", async () => {
+	async function toolsSentToModel(extraEnv) {
+		const mock = new LLMock({ port: 0, logLevel: "silent" });
+		mock.addFixtures([
+			{
+				match: { userMessage: "Reply with disallowed-tools" },
+				response: { content: "disallowed-tools" },
+			},
+		]);
+		const baseUrl = await mock.start();
+		try {
+			await withAdapter(
+				async (connection) => {
+					await connection.initialize({
+						protocolVersion: PROTOCOL_VERSION,
+						clientCapabilities: {},
+						clientInfo: { name: "agentos-test", version: "0.0.1" },
+					});
+					const session = await connection.newSession({
+						cwd: packageDir,
+						mcpServers: [],
+					});
+					const result = await connection.prompt({
+						sessionId: session.sessionId,
+						prompt: [{ type: "text", text: "Reply with disallowed-tools" }],
+					});
+					assert.equal(result.stopReason, "end_turn");
+				},
+				{ ANTHROPIC_BASE_URL: baseUrl, ...extraEnv },
+			);
+			// Claude Code also issues small toolless background calls; the main
+			// turn is the request that carries the tool schema.
+			const request = mock
+				.getRequests()
+				.find((entry) => (entry.body?.tools ?? []).length > 0);
+			assert.ok(request, "expected a tool-carrying request to reach the mock model");
+			return new Set(
+				request.body.tools.map((tool) => tool.function?.name ?? tool.name),
+			);
+		} finally {
+			await mock.stop();
+		}
+	}
+
+	const enabled = await toolsSentToModel({});
+	assert.ok(enabled.has("WebFetch"));
+	assert.ok(enabled.has("WebSearch"));
+	assert.ok(enabled.has("Read"));
+
+	const disabled = await toolsSentToModel({
+		[DISALLOWED_TOOLS_ENV]: "WebFetch,WebSearch",
+	});
+	assert.equal(disabled.has("WebFetch"), false);
+	assert.equal(disabled.has("WebSearch"), false);
+	assert.ok(disabled.has("Read"));
+});
+
+test("published Claude Agent ACP fails fast on a malformed disallowed-tools value", async () => {
+	const child = spawn(process.execPath, [adapterPath], {
+		cwd: packageDir,
+		env: {
+			...process.env,
+			CLAUDE_CODE_EXECUTABLE: claudePath,
+			ANTHROPIC_API_KEY: "agentos-test-key",
+			DISABLE_TELEMETRY: "1",
+			[DISALLOWED_TOOLS_ENV]: ",,,",
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	let stderr = "";
+	child.stderr.setEncoding("utf8");
+	child.stderr.on("data", (chunk) => {
+		stderr += chunk;
+	});
+	const [code] = await once(child, "exit");
+
+	assert.notEqual(code, 0);
+	assert.match(stderr, new RegExp(DISALLOWED_TOOLS_ENV));
 });

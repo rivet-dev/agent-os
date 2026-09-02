@@ -6,6 +6,9 @@
  * The upstream adapter delegates to an SDK that supports effort controls, but
  * that adapter version does not publish them through ACP configOptions. Keep
  * the extension here until AgentOS can consume a newer VM-compatible release.
+ *
+ * The launcher also translates the adapter-neutral `ACP_DISALLOWED_TOOLS` launch
+ * contract into the SDK's `disallowedTools` option.
  */
 
 import {
@@ -16,6 +19,11 @@ import {
 	applyEnvironmentSettings,
 	loadManagedSettings,
 } from "@agentclientprotocol/claude-agent-acp/dist/utils.js";
+import {
+	DISALLOWED_TOOLS_ENV,
+	parseDisallowedTools,
+	withDisallowedTools,
+} from "./disallowed-tools.js";
 
 type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 type ModelInfo = {
@@ -144,12 +152,32 @@ type AgentPrototype = {
 	setSessionConfigOption(
 		params: Record<string, unknown>,
 	): Promise<Record<string, unknown>>;
+	createSession(
+		params: Record<string, unknown>,
+		creationOpts?: Record<string, unknown>,
+	): Promise<Record<string, unknown>>;
 };
 
 const prototype = ClaudeAcpAgent.prototype as unknown as AgentPrototype;
 const upstreamNewSession = prototype.newSession;
 const upstreamResumeSession = prototype.unstable_resumeSession;
 const upstreamSetConfigOption = prototype.setSessionConfigOption;
+const upstreamCreateSession = prototype.createSession;
+
+// Parse the launch contract once, before the ACP server starts, so a malformed
+// policy fails the adapter with a named error on stderr instead of silently
+// leaving the tools enabled for every session on this process.
+const disallowedTools = parseDisallowedTools(process.env[DISALLOWED_TOOLS_ENV]);
+
+// Every entry point (new, resume, load, fork) funnels through createSession, so
+// patching it once applies the policy to restored sessions too.
+prototype.createSession = async function (params, creationOpts) {
+	return await upstreamCreateSession.call(
+		this,
+		withDisallowedTools(params, disallowedTools),
+		creationOpts,
+	);
+};
 
 prototype.newSession = async function (params) {
 	const response = await upstreamNewSession.call(this, params);
