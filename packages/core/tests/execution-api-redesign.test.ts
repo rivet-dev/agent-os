@@ -5,7 +5,7 @@ describe("execution API redesign", () => {
 	let vm: AgentOs;
 
 	beforeAll(async () => {
-		vm = await AgentOs.create();
+		vm = await AgentOs.create({ defaultSoftware: false });
 	}, 30_000);
 
 	afterAll(async () => {
@@ -49,6 +49,39 @@ describe("execution API redesign", () => {
 		await expect(vm.contexts.get("analysis")).rejects.toMatchObject({
 			detail: { code: "context_not_found" },
 		});
+	}, 30_000);
+
+	test("runs every Secure Exec resident-runner source unchanged", async () => {
+		const contextId = "secure-exec-resident-cases";
+		await vm.createContext(contextId);
+		try {
+			const cases = [
+				["1 + 1", ""],
+				["globalThis.x = 1", ""],
+				['console.log("A")', "A\n"],
+				['process.stdout.write("B")', "B"],
+				["export const y = 1;", ""],
+			] as const;
+
+			for (const [source, expectedStdout] of cases) {
+				const result = await vm.javascript.execute(source, {
+					contextId,
+					timeoutMs: 10_000,
+					output: { capture: "all" },
+				});
+				expect(result, source).toMatchObject({
+					outcome: "succeeded",
+					exitCode: 0,
+					stdout: expectedStdout,
+				});
+			}
+
+			expect(
+				await vm.javascript.evaluate("globalThis.x", { contextId }),
+			).toMatchObject({ outcome: "succeeded", value: 1 });
+		} finally {
+			await vm.contexts.delete(contextId);
+		}
 	}, 30_000);
 
 	test("returns a PID for spawned language work and controls it through process", async () => {
