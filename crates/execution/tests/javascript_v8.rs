@@ -6175,6 +6175,21 @@ fn js_runtime_node_platform_keeps_full_node_surface() {
     );
 }
 
+fn javascript_execution_v8_dynamic_import_accepts_data_urls() {
+    assert_js_runtime_guest_ok(
+        BTreeMap::new(),
+        r#"
+        const source = "globalThis.dataModuleRuns = (globalThis.dataModuleRuns ?? 0) + 1; export const run = globalThis.dataModuleRuns;";
+        const encoded = Buffer.from(source, "utf8").toString("base64");
+        const first = await import(`data:text/javascript;base64,${encoded}#request-1`);
+        const second = await import(`data:text/javascript;base64,${encoded}#request-2`);
+        if (first.run !== 1 || second.run !== 2) {
+          throw new Error(`unexpected data module runs: ${first.run}, ${second.run}`);
+        }
+        "#,
+    );
+}
+
 fn js_runtime_bare_platform_strips_all_host_globals() {
     // Pentest: nothing host-provided survives, and it cannot be reconstructed via
     // constructors / property-name tricks. Language + WebAssembly remain.
@@ -7217,6 +7232,7 @@ fn javascript_v8_suite() {
     javascript_execution_v8_net_socket_backpressure_stops_and_resumes_transport_reads();
     javascript_execution_v8_net_close_connect_and_accept_wakes_match_node_ordering();
     javascript_execution_v8_dynamic_import_accepts_file_urls();
+    javascript_execution_v8_dynamic_import_accepts_data_urls();
     javascript_execution_v8_import_meta_resolve_uses_guest_module_resolution();
     javascript_execution_v8_wasm_instantiate_streaming_never_hangs();
     javascript_execution_v8_structured_clone_rebinds_to_sandbox_realm();

@@ -172,6 +172,45 @@ fn builtin_subpath_normalizes_to_node_prefix() {
 }
 
 #[test]
+fn data_javascript_imports_preserve_identity_and_decode_source() {
+    let fixture = Fixture::new();
+    let mut resolver = fixture.resolver();
+    let specifier = "data:text/javascript;base64,ZXhwb3J0IGNvbnN0IHkgPSAxOw==#request-7";
+
+    assert_eq!(
+        resolver.resolve_import(specifier, "/root/project/index.js"),
+        Some(specifier.to_owned())
+    );
+    assert_eq!(
+        resolver.resolve_require(specifier, "/root/project/index.js"),
+        None
+    );
+    assert_eq!(resolver.module_format(specifier), Some("module"));
+    assert_eq!(
+        resolver.load_module(specifier).as_deref(),
+        Some("export const y = 1;")
+    );
+
+    let encoded = "data:application/javascript;charset=utf-8,export%20default%20%22agentOS%22";
+    assert_eq!(resolver.module_format(encoded), Some("module"));
+    assert_eq!(
+        resolver.load_module(encoded).as_deref(),
+        Some("export default \"agentOS\"")
+    );
+
+    assert_eq!(
+        resolver.resolve_import("./relative.mjs", specifier),
+        None,
+        "data URLs have no hierarchical base"
+    );
+    assert_eq!(
+        resolver.resolve_import("package-from-node-modules", specifier),
+        None,
+        "data URLs cannot resolve bare packages"
+    );
+}
+
+#[test]
 fn relative_import_probes_js_extension() {
     let fixture = Fixture::new();
     fixture.write("project/src/foo.js", "export default 1;");

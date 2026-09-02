@@ -13,6 +13,8 @@ use crate::v8_runtime;
 use agentos_bridge::queue_tracker::{register_queue, TrackedLimit};
 use agentos_runtime::RuntimeContext;
 use agentos_v8_runtime::runtime_protocol::{RuntimeCommand, WarmSessionHint};
+use base64::engine::general_purpose::{STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD};
+use base64::Engine as _;
 use flume::{Receiver as EventReceiver, Sender as EventSender};
 use getrandom::getrandom;
 use serde::Deserialize;
@@ -1509,6 +1511,10 @@ impl ModuleResolutionTestHarness {
         self.local_bridge
             .module_format(path)
             .map(LocalResolvedModuleFormat::as_str)
+    }
+
+    pub fn load_module(&mut self, path: &str) -> Option<String> {
+        self.local_bridge.load_file(path)
     }
 }
 
@@ -4727,7 +4733,8 @@ impl LocalBridgeState {
             || specifier == "."
             || specifier == ".."
             || specifier.starts_with('/')
-            || specifier.starts_with("file:");
+            || specifier.starts_with("file:")
+            || specifier.starts_with("data:");
         match self.module_resolution {
             GuestModuleResolution::Node => false,
             // Relative permits local files only; bare specifiers and package
@@ -4862,6 +4869,17 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
         from_dir: &str,
         mode: ModuleResolveMode,
     ) -> Option<String> {
+        // A data URL is already an absolute module identity. Keep its fragment
+        // intact (callers use it as a cache-busting identity), and do not retain
+        // it in the per-VM path cache: a stream of unique inline modules must not
+        // grow that cache without bound.
+        if specifier.starts_with("data:") {
+            return (mode == ModuleResolveMode::Import
+                && data_javascript_module_parts(specifier).is_some())
+            .then(|| specifier.to_owned());
+        }
+
+        let data_referrer = from_dir.starts_with("data:");
         let normalized_from_path = self
             .reader
             .canonical_guest_path(from_dir)
@@ -4883,6 +4901,10 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
                 .and_then(|file_path| self.resolve_path(&file_path, mode))
         } else if specifier.starts_with('/') {
             self.resolve_path(specifier, mode)
+        } else if data_referrer {
+            // Like Node, data: modules have no hierarchical base for relative,
+            // package-import, self-reference, or bare-package resolution.
+            None
         } else if specifier.starts_with("./")
             || specifier.starts_with("../")
             || specifier == "."
@@ -4905,6 +4927,10 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
     }
 
     pub fn load_file(&mut self, path: &str) -> Option<String> {
+        if path.starts_with("data:") {
+            return data_javascript_module_source(path);
+        }
+
         let bare = path.trim_start_matches("node:");
         if is_builtin_specifier(path) {
             return Some(build_builtin_module_wrapper(bare));
@@ -4924,6 +4950,12 @@ impl<'a, R: ModuleFsReader> ModuleResolver<'a, R> {
     }
 
     pub fn module_format(&mut self, path: &str) -> Option<LocalResolvedModuleFormat> {
+        // Do not cache caller-generated data URLs; their fragments are commonly
+        // unique per execution and the MIME type is cheap to inspect.
+        if path.starts_with("data:") {
+            return data_javascript_module_parts(path).map(|_| LocalResolvedModuleFormat::Module);
+        }
+
         if let Some(cached) = self.cache.module_format_results.get(path) {
             return *cached;
         }
@@ -5236,7 +5268,43 @@ fn guest_path_from_file_url(specifier: &str) -> Option<String> {
     Some(normalize_guest_path(&percent_decode(pathname)?))
 }
 
+fn data_javascript_module_parts(specifier: &str) -> Option<(bool, &str)> {
+    let raw = specifier.strip_prefix("data:")?;
+    let without_fragment = raw.split_once('#').map_or(raw, |value| value.0);
+    let (metadata, payload) = without_fragment.split_once(',')?;
+    let mut metadata_parts = metadata.split(';');
+    let media_type = metadata_parts.next()?.trim();
+    if !media_type.eq_ignore_ascii_case("text/javascript")
+        && !media_type.eq_ignore_ascii_case("application/javascript")
+    {
+        return None;
+    }
+    let base64 = metadata_parts.any(|part| part.trim().eq_ignore_ascii_case("base64"));
+    Some((base64, payload))
+}
+
+fn data_javascript_module_source(specifier: &str) -> Option<String> {
+    let (base64, payload) = data_javascript_module_parts(specifier)?;
+    let mut decoded_payload = percent_decode_bytes(payload);
+    let source = if base64 {
+        // WHATWG forgiving-base64 decoding ignores ASCII whitespace. This also
+        // matches Node for both literal and percent-encoded line wrapping.
+        decoded_payload.retain(|byte| !byte.is_ascii_whitespace());
+        BASE64
+            .decode(&decoded_payload)
+            .or_else(|_| BASE64_NO_PAD.decode(&decoded_payload))
+            .ok()?
+    } else {
+        decoded_payload
+    };
+    String::from_utf8(source).ok()
+}
+
 fn percent_decode(raw: &str) -> Option<String> {
+    String::from_utf8(percent_decode_bytes(raw)).ok()
+}
+
+fn percent_decode_bytes(raw: &str) -> Vec<u8> {
     let bytes = raw.as_bytes();
     let mut index = 0;
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -5260,7 +5328,7 @@ fn percent_decode(raw: &str) -> Option<String> {
             }
         }
     }
-    String::from_utf8(decoded).ok()
+    decoded
 }
 
 fn hex_digit(byte: u8) -> Option<u8> {
