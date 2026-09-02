@@ -721,6 +721,66 @@ fn javascript_module_execution_accepts_inline_exports_in_a_context() {
 }
 
 #[test]
+fn javascript_module_execution_awaits_top_level_promises_in_a_context() {
+    let mut sidecar = new_sidecar("language-execution-top-level-await");
+    let connection_id = authenticate_wire(&mut sidecar, "language-execution-top-level-await");
+    let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
+    let cwd = temp_dir("language-execution-top-level-await-cwd");
+    let (vm_id, _) = create_vm_wire(
+        &mut sidecar,
+        3,
+        &connection_id,
+        &session_id,
+        wire::GuestRuntimeKind::JavaScript,
+        &cwd,
+    );
+    create_context(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        "module-context",
+    );
+
+    let started = sidecar
+        .dispatch_wire_blocking(wire_request(
+            4,
+            wire_vm(&connection_id, &session_id, &vm_id),
+            wire::RequestPayload::JavaScriptExecutionRequest(wire::JavaScriptExecutionRequest {
+                process: context_process_options("module-context"),
+                source: String::from(
+                    "const value = await Promise.resolve(42);\n\
+                     if (value !== 42) throw new Error(`unexpected value: ${value}`);\n\
+                     export { value };",
+                ),
+                format: Some(wire::JavaScriptModuleFormat::Module),
+                file_path: None,
+                inputs: None,
+            }),
+        ))
+        .expect("start inline ES module with top-level await");
+    let execution_id = accepted_execution_id(started);
+    let result = wait_for_execution(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        &execution_id,
+    );
+    assert_eq!(result.outcome, wire::ExecutionOutcome::Succeeded);
+    assert_eq!(result.exit_code, Some(0));
+
+    reset_execution(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        &execution_id,
+    );
+    dispose_vm_and_close_session_wire(&mut sidecar, &connection_id, &session_id, &vm_id);
+}
+
+#[test]
 fn typescript_check_reports_semantic_diagnostics() {
     let mut sidecar = new_sidecar("language-execution-typescript-check");
     let connection_id = authenticate_wire(&mut sidecar, "typescript-check-connection");
