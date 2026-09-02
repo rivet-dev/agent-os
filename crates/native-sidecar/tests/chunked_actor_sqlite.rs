@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agentos_actor_uds_client::protocol as wire;
 use rusqlite::types::{Value, ValueRef};
@@ -6,6 +7,8 @@ use rusqlite::{params_from_iter, Connection};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Notify;
+use tokio::time::timeout;
 use vbare::OwnedVersionedData;
 
 // The included plugin only needs the mount context's runtime handle. Keep the
@@ -244,6 +247,91 @@ async fn serve_connection(mut stream: UnixStream, database: Arc<Mutex<Connection
     }
 }
 
+struct TransactionRaceGate {
+    first_leased_query: Notify,
+    release_first_leased_query: Notify,
+}
+
+async fn serve_transaction_race_connection(mut stream: UnixStream, gate: Arc<TransactionRaceGate>) {
+    wire::versioned::ClientHello::deserialize_with_embedded_version(&read_frame(&mut stream).await)
+        .unwrap();
+    let response =
+        wire::versioned::ServerHello::wrap_latest(wire::ServerHello::HelloOk(wire::HelloOk {
+            max_frame_bytes: 32 * 1024 * 1024,
+        }))
+        .serialize_with_embedded_version(1)
+        .unwrap();
+    write_frame(&mut stream, &response).await;
+
+    let mut connection = Connection::open_in_memory().unwrap();
+    let mut active_lease = None;
+    let mut leased_query_count = 0;
+    loop {
+        let payload = match stream.read_u32().await {
+            Ok(len) => {
+                let mut payload = vec![0; len as usize];
+                stream.read_exact(&mut payload).await.unwrap();
+                payload
+            }
+            Err(_) => return,
+        };
+        let wire::ClientFrame::Request(request) =
+            wire::versioned::ClientFrame::deserialize_with_embedded_version(&payload).unwrap();
+        let request_id = request.request_id;
+        let response = match request.payload {
+            wire::RequestPayload::SqliteExec(exec) => {
+                connection.execute_batch(&exec.script).unwrap();
+                wire::ResponsePayload::SqliteExecOk
+            }
+            wire::RequestPayload::SqliteQuery(query) => match request.lease_key.as_deref() {
+                Some(lease_key) => {
+                    assert_eq!(active_lease.as_deref(), Some(lease_key));
+                    leased_query_count += 1;
+                    let response = execute_query(&mut connection, query);
+                    if leased_query_count == 1 {
+                        gate.first_leased_query.notify_one();
+                        gate.release_first_leased_query.notified().await;
+                    }
+                    response
+                }
+                None if active_lease.is_some() => {
+                    // RivetKit queues non-leased work behind the active transaction.
+                    // The transaction cannot finish if this request owns the one UDS
+                    // connection, which is the ordering this regression test targets.
+                    std::future::pending::<wire::ResponsePayload>().await
+                }
+                None => execute_query(&mut connection, query),
+            },
+            wire::RequestPayload::SqliteBegin(begin) => {
+                assert!(active_lease.replace(begin.lease_key).is_none());
+                connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                wire::ResponsePayload::SqliteBeginOk
+            }
+            wire::RequestPayload::SqliteCommit(commit) => {
+                assert_eq!(active_lease.as_deref(), Some(commit.lease_key.as_str()));
+                active_lease = None;
+                connection.execute_batch("COMMIT").unwrap();
+                wire::ResponsePayload::SqliteCommitOk
+            }
+            wire::RequestPayload::SqliteRollback(rollback) => {
+                assert_eq!(active_lease.as_deref(), Some(rollback.lease_key.as_str()));
+                active_lease = None;
+                connection.execute_batch("ROLLBACK").unwrap();
+                wire::ResponsePayload::SqliteRollbackOk
+            }
+        };
+        let response = wire::versioned::ServerFrame::wrap_latest(wire::ServerFrame::Response(
+            wire::Response {
+                request_id,
+                payload: response,
+            },
+        ))
+        .serialize_with_embedded_version(1)
+        .unwrap();
+        write_frame(&mut stream, &response).await;
+    }
+}
+
 #[tokio::test]
 async fn metadata_and_blocks_persist_directly_over_actor_sqlite_uds() {
     let dir = tempdir().unwrap();
@@ -396,5 +484,69 @@ async fn migrations_are_independent_strict_and_atomic_over_actor_sqlite_uds() {
             vm_sqlite::SqlValue::SqlInteger(1),
         ]]
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn standalone_queries_do_not_deadlock_actor_uds_transactions() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("actor-transaction-race.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let gate = Arc::new(TransactionRaceGate {
+        first_leased_query: Notify::new(),
+        release_first_leased_query: Notify::new(),
+    });
+    let server_gate = Arc::clone(&gate);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_transaction_race_connection(stream, server_gate).await;
+    });
+
+    let runtime =
+        agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
+            .unwrap();
+    let database = vm_sqlite::resolve_vm_sqlite(
+        &agentos_vm_config::VmSqliteDescriptor::ActorUds {
+            path: path.display().to_string(),
+        },
+        runtime.context(),
+        128 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+
+    let transaction_database = Arc::clone(&database);
+    let transaction = tokio::spawn(async move {
+        transaction_database
+            .transaction(vec![
+                vm_sqlite::SqlStatement::plain("SELECT 1"),
+                vm_sqlite::SqlStatement::plain("SELECT 2"),
+            ])
+            .await
+    });
+    timeout(Duration::from_secs(1), gate.first_leased_query.notified())
+        .await
+        .expect("transaction did not reach its first query");
+
+    let query_database = Arc::clone(&database);
+    let query_started = Arc::new(Notify::new());
+    let query_started_task = Arc::clone(&query_started);
+    let query = tokio::spawn(async move {
+        query_started_task.notify_one();
+        query_database
+            .query(vm_sqlite::SqlStatement::plain("SELECT 3"))
+            .await
+    });
+    query_started.notified().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    gate.release_first_leased_query.notify_one();
+
+    let (transaction, query) = timeout(Duration::from_secs(1), async {
+        tokio::join!(transaction, query)
+    })
+    .await
+    .expect("standalone query deadlocked the active actor UDS transaction");
+    assert_eq!(transaction.unwrap().unwrap().len(), 2);
+    assert_eq!(query.unwrap().unwrap().rows.len(), 1);
     server.abort();
 }

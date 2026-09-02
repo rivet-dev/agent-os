@@ -1,10 +1,9 @@
 //! VM-scoped SQLite substrate shared by VFS and AgentOS durable state.
 //!
-//! The actor backend is intentionally a thin translation over `ActorUdsClient`.
+//! The actor backend serializes complete operations over `ActorUdsClient`.
 //! Rivet owns transaction isolation through lease keys, so every transaction
 //! uses one fresh UUID and attaches it to `BEGIN`, every statement, and the
-//! terminal `COMMIT` or `ROLLBACK`. No second mux, pool, or retry scheduler is
-//! needed in the sidecar.
+//! terminal `COMMIT` or `ROLLBACK`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -15,6 +14,7 @@ pub use agentos_actor_uds_client::{QueryResult, SqlValue};
 use async_trait::async_trait;
 use rusqlite::types::{Value, ValueRef};
 use thiserror::Error;
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use agentos_vm_config::VmSqliteDescriptor;
@@ -123,9 +123,9 @@ pub async fn resolve_vm_sqlite(
     }
 }
 
-#[derive(Clone)]
 struct ActorUdsVmSqliteDatabase {
     client: ActorUdsClient,
+    operation: AsyncMutex<()>,
     max_result_bytes: usize,
 }
 
@@ -133,6 +133,7 @@ impl ActorUdsVmSqliteDatabase {
     async fn open(path: String, max_result_bytes: usize) -> Result<Self, VmSqliteError> {
         let database = Self {
             client: ActorUdsClient::new(path),
+            operation: AsyncMutex::new(()),
             max_result_bytes,
         };
         database.enable_and_verify_foreign_keys().await?;
@@ -151,6 +152,7 @@ impl ActorUdsVmSqliteDatabase {
 #[async_trait]
 impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
     async fn query(&self, statement: SqlStatement) -> Result<QueryResult, VmSqliteError> {
+        let _operation = self.operation.lock().await;
         let result = self.client.query(statement.sql, statement.params).await?;
         validate_result_size(&result, self.max_result_bytes)?;
         Ok(result)
@@ -160,6 +162,7 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
         &self,
         statements: Vec<SqlStatement>,
     ) -> Result<Vec<QueryResult>, VmSqliteError> {
+        let _operation = self.operation.lock().await;
         let key = Uuid::new_v4().to_string();
         self.client.begin(&key, None).await?;
         let mut results = Vec::with_capacity(statements.len());
