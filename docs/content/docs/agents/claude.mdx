@@ -43,6 +43,14 @@ Expose extra tools to the agent by passing `mcpServers` to `openSession`. Both l
 **Pre-install `npx`-launched servers.** A local server started with `npx -y …` writes install progress to **stdout** on its first run, which corrupts the MCP stdio handshake (you'll see `Connection closed`). Pre-install it in the VM so `npx` is silent — `await agent.process.exec("npm install -g @modelcontextprotocol/server-filesystem")` before the session — or pin the package and point `command` at the installed binary.
 </Note>
 
+## Disallowing built-in tools
+
+Set `ACP_DISALLOWED_TOOLS` on the session's `env` to keep named built-in tools out of the model's context. Without it, a tool that cannot work in your deployment stays visible to the model, which keeps calling it and keeps failing.
+
+<CodeSnippet file="examples/claude/client.ts" title="client.ts" region="disallowed-tools" />
+
+The value is a comma-separated list of tool names (`WebFetch,WebSearch`), or a JSON array of strings when a name itself contains a comma (`["Bash(git commit:*)"]`). Unset keeps every tool enabled; a malformed value fails the session rather than silently leaving the tools on.
+
 ## Customizing the agent
 
 Claude Code is a built-in agent, but it's just a software package under the hood. To ship your own ACP adapter, swap the underlying agent SDK, or register a tweaked build as a new agent, see [Custom Agents](/agentos/docs/agents/custom).
