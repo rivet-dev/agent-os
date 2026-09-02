@@ -37,6 +37,11 @@ export interface InlineExecutionOptions extends LanguageExecutionOptions {
 }
 
 export interface JavaScriptExecutionOptions extends InlineExecutionOptions {
+	/**
+	 * `module` (the default) evaluates each call as an independent root ES module.
+	 * A retained context preserves `globalThis`, not the module's lexical scope.
+	 * Use `commonjs` for REPL-style top-level bindings shared by later calls.
+	 */
 	format?: "module" | "commonjs";
 	filePath?: string;
 }

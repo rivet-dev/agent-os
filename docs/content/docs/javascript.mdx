@@ -44,14 +44,20 @@ interpolated into source.
 
 ## Keep state between calls
 
-Pass a `contextId` to keep globals, imports, and modules alive across calls in
-one retained V8 isolate.
+Pass a `contextId` to keep one V8 isolate and its global state alive across
+calls.
 
 <CodeSnippet file="examples/js-sdk-overview/src/contexts.ts" />
 
 A context runs one operation at a time — reusing a busy `contextId` fails
 immediately. Files, npm, Bash, and type checks may pass the same id, but they run
 in fresh processes and never touch retained memory.
+
+JavaScript defaults to `format: "module"`. Each call is a separate root ES
+module, so its imports, top-level declarations, and exports are scoped to that
+call. Put values on `globalThis` when a later call in the same context needs
+them. For REPL-style script semantics where top-level lexical declarations stay
+visible, pass `format: "commonjs"` consistently for that context.
 
 Create the context explicitly before use; an unknown id fails instead of silently
 starting fresh state. A context pins to the first inline language that used it,
