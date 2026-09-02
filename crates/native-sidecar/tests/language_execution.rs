@@ -665,7 +665,7 @@ fn javascript_execution_reuses_retained_context() {
 }
 
 #[test]
-fn javascript_module_execution_accepts_inline_exports_in_a_context() {
+fn javascript_module_execution_accepts_inline_exports_and_data_imports_in_a_context() {
     let mut sidecar = new_sidecar("language-execution-inline-esm");
     let connection_id = authenticate_wire(&mut sidecar, "language-execution-inline-esm");
     let session_id = open_session_wire(&mut sidecar, 2, &connection_id);
@@ -762,6 +762,39 @@ fn javascript_module_execution_accepts_inline_exports_in_a_context() {
     );
     assert_eq!(evaluation_result.outcome, wire::ExecutionOutcome::Succeeded);
     assert_eq!(evaluation_result.evaluation_value.as_deref(), Some("2"));
+
+    let data_import = sidecar
+        .dispatch_wire_blocking(wire_request(
+            7,
+            wire_vm(&connection_id, &session_id, &vm_id),
+            wire::RequestPayload::JavaScriptExecutionRequest(wire::JavaScriptExecutionRequest {
+                process: context_process_options("module-context"),
+                source: String::from(
+                    r#"
+const source = Buffer.from("export const value = 42;", "utf8").toString("base64");
+const imported = await import(`data:text/javascript;base64,${source}#request-7`);
+if (imported.value !== 42) throw new Error(`unexpected data import: ${imported.value}`);
+"#,
+                ),
+                format: Some(wire::JavaScriptModuleFormat::Module),
+                file_path: None,
+                inputs: None,
+            }),
+        ))
+        .expect("import a base64 JavaScript data URL");
+    assert_eq!(accepted_execution_id(data_import), execution_id);
+    let data_import_result = wait_for_execution(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        &execution_id,
+    );
+    assert_eq!(
+        data_import_result.outcome,
+        wire::ExecutionOutcome::Succeeded
+    );
+    assert_eq!(data_import_result.exit_code, Some(0));
 
     reset_execution(
         &mut sidecar,
