@@ -35,6 +35,7 @@ const TTY_ENV: &str = "AGENTOS_EXEC_TTY";
 const TTY_COLS_ENV: &str = "AGENTOS_EXEC_TTY_COLS";
 const TTY_ROWS_ENV: &str = "AGENTOS_EXEC_TTY_ROWS";
 const RETAIN_LANGUAGE_CONTEXT_ENV: &str = "AGENTOS_RETAIN_LANGUAGE_CONTEXT";
+const GUEST_ENTRYPOINT_MODULE_MODE_ENV: &str = "AGENTOS_GUEST_ENTRYPOINT_MODULE_MODE";
 const INLINE_FILE_PATH_ENV: &str = "AGENTOS_INLINE_FILE_PATH";
 const USE_BUNDLED_TYPESCRIPT_ENV: &str = "AGENTOS_USE_BUNDLED_TYPESCRIPT";
 const SEMANTIC_RESULT_PATH_PREFIX: &str = "/tmp/.agentos-semantic-result-";
@@ -336,14 +337,6 @@ fn transpile_typescript(
     transform_source(source, file_path, true, common_js)
 }
 
-fn transform_retained_javascript_module(
-    source: &str,
-    file_path: &str,
-) -> Result<String, SidecarError> {
-    let source = rewrite_static_imports(source, file_path, false)?;
-    transform_source(&source, file_path, false, true)
-}
-
 fn transform_retained_typescript_module(
     source: &str,
     file_path: &str,
@@ -528,16 +521,19 @@ fn lower_operation(payload: RequestPayload) -> Result<LoweredOperation, SidecarE
             let module = payload.format == Some(JavaScriptModuleFormat::Module);
             let mut source = inline_inputs_prefix(payload.inputs, false);
             source.push_str(&payload.source);
-            if module {
-                source = transform_retained_javascript_module(&source, &file_path)?;
-            }
             let retained_source = source.clone();
             let mut operation =
                 lowered_process(payload.process, "node", vec![String::from("-e"), source]);
             operation.retained_language = Some(RetainedExecutionLanguage::JavaScript);
             operation.retained_source = Some(retained_source);
             operation.retained_file_path = Some(file_path.clone());
-            operation.retained_module = false;
+            operation.retained_module = module;
+            if module {
+                operation.env.insert(
+                    String::from(GUEST_ENTRYPOINT_MODULE_MODE_ENV),
+                    String::from("1"),
+                );
+            }
             operation
                 .env
                 .insert(String::from(INLINE_FILE_PATH_ENV), file_path);
@@ -556,15 +552,18 @@ fn lower_operation(payload: RequestPayload) -> Result<LoweredOperation, SidecarE
                 serde_json::to_string(&result_path)
                     .expect("semantic result path serialization cannot fail")
             ));
-            if module {
-                source = transform_retained_javascript_module(&source, &file_path)?;
-            }
             let mut operation =
                 lowered_process(payload.process, "node", vec![String::from("-e"), source]);
             operation.retained_language = Some(RetainedExecutionLanguage::JavaScript);
             operation.retained_source = operation.args.get(1).cloned();
             operation.retained_file_path = Some(file_path.clone());
-            operation.retained_module = false;
+            operation.retained_module = module;
+            if module {
+                operation.env.insert(
+                    String::from(GUEST_ENTRYPOINT_MODULE_MODE_ENV),
+                    String::from("1"),
+                );
+            }
             operation
                 .env
                 .insert(String::from(INLINE_FILE_PATH_ENV), file_path);
