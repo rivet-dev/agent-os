@@ -519,6 +519,8 @@ fn legacy_limits_config(
     };
     let sqlite = agentos_vm_config::SqliteLimitsConfig {
         max_result_bytes: legacy_u64(metadata, "limits.sqlite.max_result_bytes"),
+        max_in_flight_requests: legacy_u64(metadata, "limits.sqlite.max_in_flight_requests"),
+        max_queued_request_bytes: legacy_u64(metadata, "limits.sqlite.max_queued_request_bytes"),
     };
     let js_runtime = agentos_vm_config::JsRuntimeLimitsConfig {
         v8_heap_limit_mb: legacy_u64(metadata, "limits.js_runtime.v8_heap_limit_mb"),
@@ -595,7 +597,10 @@ fn legacy_limits_config(
         bindings: legacy_has_binding_limits(&bindings).then_some(bindings),
         plugins: legacy_has_plugin_limits(&plugins).then_some(plugins),
         acp: legacy_has_acp_limits(&acp).then_some(acp),
-        sqlite: sqlite.max_result_bytes.is_some().then_some(sqlite),
+        sqlite: (sqlite.max_result_bytes.is_some()
+            || sqlite.max_in_flight_requests.is_some()
+            || sqlite.max_queued_request_bytes.is_some())
+        .then_some(sqlite),
         js_runtime: legacy_has_js_runtime_limits(&js_runtime).then_some(js_runtime),
         python: legacy_has_python_limits(&python).then_some(python),
         wasm: legacy_has_wasm_limits(&wasm).then_some(wasm),

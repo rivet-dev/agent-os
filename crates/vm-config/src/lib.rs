@@ -1251,7 +1251,11 @@ limits_struct!(AcpLimitsConfig {
     max_permission_outcomes_per_vm,
 });
 
-limits_struct!(SqliteLimitsConfig { max_result_bytes });
+limits_struct!(SqliteLimitsConfig {
+    max_result_bytes,
+    max_in_flight_requests,
+    max_queued_request_bytes,
+});
 
 limits_struct!(JsRuntimeLimitsConfig {
     v8_heap_limit_mb,

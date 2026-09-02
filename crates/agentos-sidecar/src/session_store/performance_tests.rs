@@ -5,9 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use agentos_actor_uds_client::protocol as wire;
-use agentos_native_sidecar::limits::{
-    DEFAULT_ACP_MAX_SESSION_LIST_ENTRIES, DEFAULT_SQLITE_MAX_RESULT_BYTES,
-};
+use agentos_native_sidecar::limits::{SqliteLimits, DEFAULT_ACP_MAX_SESSION_LIST_ENTRIES};
 use agentos_native_sidecar::vm_sqlite::{VmSqliteDatabase, VmSqliteError};
 use agentos_vm_config::VmSqliteDescriptor;
 use async_trait::async_trait;
@@ -91,7 +89,7 @@ impl ActorUdsFixture {
                 path: self.path.clone(),
             },
             runtime().context(),
-            DEFAULT_SQLITE_MAX_RESULT_BYTES,
+            SqliteLimits::default(),
         )
         .await
         .expect("actor database")
@@ -428,7 +426,7 @@ fn append_work_is_constant_near_history_limit_on_local_file_and_actor_uds() {
                 path: dir.path().join("history.sqlite").display().to_string(),
             },
             runtime().context(),
-            DEFAULT_SQLITE_MAX_RESULT_BYTES,
+            SqliteLimits::default(),
         )
         .await
         .expect("local database");

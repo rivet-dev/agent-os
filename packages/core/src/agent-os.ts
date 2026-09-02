@@ -703,9 +703,11 @@ export interface AgentOsLimits {
 		maxHistoryPageEntries?: number;
 		maxSessionListEntries?: number;
 	};
-	/** Shared local-file/actor-UDS SQLite result materialization limit. */
+	/** Shared SQLite and actor-UDS request limits. */
 	sqlite?: {
 		maxResultBytes?: number;
+		maxInFlightRequests?: number;
+		maxQueuedRequestBytes?: number;
 	};
 	/** Guest JavaScript runtime buffering limits. */
 	jsRuntime?: {
