@@ -31,6 +31,15 @@ Returning `undefined`, a function, a symbol, or a circular value fails with
 
 <CodeSnippet file="examples/js-sdk-overview/src/index.ts" />
 
+Inline JavaScript defaults to ES modules, including static and dynamic imports,
+`export` declarations, and top-level `await`. Node-compatible
+`data:text/javascript` imports work too, including base64 payloads with unique
+URL fragments. You do not need to write an `.mjs` file to use these features.
+
+`execute()` does not return the module namespace. Use `evaluate()` for a
+JSON-serializable host result, or assign to `globalThis` when another call in the
+same context needs the value.
+
 Executions are ephemeral, so capture stdio only when you want it — `"stderr"` for
 diagnostics, `"all"` for both streams. `onStdout`/`onStderr` stream live and work
 independently of capture.
