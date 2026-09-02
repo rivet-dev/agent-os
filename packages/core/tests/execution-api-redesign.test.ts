@@ -84,6 +84,17 @@ describe("execution API redesign", () => {
 		}
 	}, 30_000);
 
+	test("does not require module exports to be structured-cloneable", async () => {
+		const result = await vm.javascript.execute(
+			"export function callable() { return 42; }",
+			{ timeoutMs: 10_000 },
+		);
+		expect(result).toMatchObject({
+			outcome: "succeeded",
+			exitCode: 0,
+		});
+	}, 30_000);
+
 	test("returns a PID for spawned language work and controls it through process", async () => {
 		const process = await vm.javascript.spawn("console.log('spawned')", {
 			output: { retainEvents: true },

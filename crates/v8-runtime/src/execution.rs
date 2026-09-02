@@ -1172,6 +1172,29 @@ fn serialize_module_exports(
     })
 }
 
+fn serialize_module_exports_if_supported(
+    scope: &mut v8::HandleScope,
+    module: v8::Local<v8::Module>,
+) -> Option<Vec<u8>> {
+    // Module namespaces can contain functions and other values that V8's
+    // structured-clone serializer cannot represent. Export snapshots are an
+    // optional transport optimization, so an uncloneable namespace must not
+    // turn otherwise successful module evaluation into an execution failure.
+    // Use a nested TryCatch so the serializer's DataCloneError cannot leak back
+    // into the completed module evaluation.
+    let tc = &mut v8::TryCatch::new(scope);
+    match serialize_module_exports(tc, module) {
+        Ok(exports) => Some(exports),
+        Err(err) => {
+            eprintln!(
+                "[agentOS] module completed, but its exports could not be serialized and were omitted: {}",
+                err.message
+            );
+            None
+        }
+    }
+}
+
 #[cfg_attr(test, allow(dead_code))]
 pub fn finalize_pending_module_evaluation(
     scope: &mut v8::HandleScope,
@@ -1211,14 +1234,9 @@ pub fn finalize_pending_module_evaluation(
                 return Some((code, None, Some(err)));
             }
 
-            match serialize_module_exports(tc, module) {
-                Ok(exports) => Some((
-                    extract_global_process_exit_code(tc).unwrap_or(0),
-                    Some(exports),
-                    None,
-                )),
-                Err(err) => Some((1, None, Some(err))),
-            }
+            let exit_code = extract_global_process_exit_code(tc).unwrap_or(0);
+            let exports = serialize_module_exports_if_supported(tc, module);
+            Some((exit_code, exports, None))
         }
     }
 }
@@ -1414,21 +1432,12 @@ pub fn execute_module(
             return (exit_code, None, Some(err));
         }
 
-        let exports_bytes = match serialize_module_exports(tc, module) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                clear_module_state();
-                return (1, None, Some(err));
-            }
-        };
+        let exit_code = extract_global_process_exit_code(tc).unwrap_or(0);
+        let exports = serialize_module_exports_if_supported(tc, module);
 
         // Keep module resolve state available after the initial module finishes.
         // Dynamic imports can still fire later on the same session event loop.
-        (
-            extract_global_process_exit_code(tc).unwrap_or(0),
-            Some(exports_bytes),
-            None,
-        )
+        (exit_code, exports, None)
     }
 }
 
@@ -5063,7 +5072,39 @@ export const file = new File([], "empty.txt");
             }
         }
 
-        // --- Part 25a: ESM completion honors process.exitCode ---
+        // --- Part 25a: ESM with an uncloneable namespace still succeeds ---
+        {
+            let mut iso = isolate::create_isolate(None);
+            let ctx = isolate::create_context(&mut iso);
+
+            let bridge_ctx = BridgeCallContext::new(
+                Box::new(Vec::new()),
+                Box::new(Cursor::new(Vec::new())),
+                "test-session".into(),
+            );
+            let (code, exports, error) = {
+                let scope = &mut v8::HandleScope::new(&mut iso);
+                let local = v8::Local::new(scope, &ctx);
+                let scope = &mut v8::ContextScope::new(scope, local);
+                execute_module(
+                    scope,
+                    &bridge_ctx,
+                    "",
+                    "export function callable() { return 42; }",
+                    None,
+                    &mut None,
+                )
+            };
+
+            assert_eq!(code, 0);
+            assert!(
+                exports.is_none(),
+                "uncloneable module namespaces should omit the optional export snapshot"
+            );
+            assert!(error.is_none());
+        }
+
+        // --- Part 25b: ESM completion honors process.exitCode ---
         {
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
@@ -5092,7 +5133,7 @@ export const file = new File([], "empty.txt");
             assert!(error.is_none());
         }
 
-        // --- Part 25b: ESM root modules receive fetch globals from the runtime prelude ---
+        // --- Part 25c: ESM root modules receive fetch globals from the runtime prelude ---
         {
             let mut iso = isolate::create_isolate(None);
             let ctx = isolate::create_context(&mut iso);
