@@ -84,8 +84,12 @@ pub struct InlineExecutionOptions {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum JavaScriptModuleFormat {
+    /// Evaluate each call as an independent root ES module. A retained context
+    /// preserves `globalThis`, not the module's lexical scope.
     #[default]
     Module,
+    /// Use script/CommonJS semantics, including REPL-style top-level bindings
+    /// that remain visible to later calls in a retained context.
     CommonJs,
 }
 
