@@ -5,9 +5,9 @@ import { join } from "node:path";
 // `publish = false` stay out of this list.
 export const RUST_CRATE_ORDER = [
 	"agentos-build-support",
-	"agentos-actor-uds-client",
 	"agentos-bridge",
 	"agentos-runtime",
+	"agentos-actor-uds-client",
 	"agentos-vfs-core",
 	"agentos-vfs",
 	"agentos-kernel",
