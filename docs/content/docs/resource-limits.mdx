@@ -45,6 +45,8 @@ enforce an explicit concurrent-executor ceiling.
 | `acp.maxPendingPermissionsPerVm` | Actionable ACP permission requests across one VM | Default is `10000`. |
 | `acp.maxPermissionOutcomesPerSession` | Terminal ACP permission outcomes retained for one session | Default is `10000`; it must not exceed `acp.maxPermissionOutcomesPerVm`. |
 | `acp.maxPermissionOutcomesPerVm` | Terminal ACP permission outcomes retained across one VM | Default is `100000`. Old outcomes are bounded independently from pending requests. |
+| `sqlite.maxInFlightRequests` | Concurrent actor-UDS SQLite requests admitted for one VM | Default is `64`. Requests above the cap fail with a typed error naming this field. |
+| `sqlite.maxQueuedRequestBytes` | Actor-UDS SQLite request bytes waiting to be written | Default is `64 MiB`. Requests above the cap fail instead of growing the client queue without bound. |
 | `jsRuntime.v8HeapLimitMb` | Guest JavaScript V8 heap, in MiB | Default is `128`. |
 | `jsRuntime.cpuTimeLimitMs` | Active JavaScript CPU time | Default is `30000`; `0` disables the CPU watchdog. |
 | `jsRuntime.wallClockLimitMs` | JavaScript elapsed wall-clock backstop | Default is `0`, disabled. Use this for finite commands, not long-lived adapters. |

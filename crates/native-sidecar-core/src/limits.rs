@@ -7,7 +7,7 @@
 
 use agentos_kernel::resource_accounting::ResourceLimits;
 #[cfg(test)]
-use agentos_vm_config::ExecutionLimitsConfig;
+use agentos_vm_config::{ExecutionLimitsConfig, SqliteLimitsConfig};
 use agentos_vm_config::{
     Http2LimitsConfig, ReactorLimitsConfig, ResourceLimitsConfig, TlsLimitsConfig, UdpLimitsConfig,
     VmLimitsConfig,
@@ -50,6 +50,8 @@ pub const DEFAULT_ACP_MAX_PENDING_PERMISSIONS_PER_VM: usize = 10_000;
 pub const DEFAULT_ACP_MAX_PERMISSION_OUTCOMES_PER_SESSION: usize = 10_000;
 pub const DEFAULT_ACP_MAX_PERMISSION_OUTCOMES_PER_VM: usize = 100_000;
 pub const DEFAULT_SQLITE_MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
+pub const DEFAULT_SQLITE_MAX_IN_FLIGHT_REQUESTS: usize = 64;
+pub const DEFAULT_SQLITE_MAX_QUEUED_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
 pub const DEFAULT_JS_CAPTURED_OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_JS_STDIN_BUFFER_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -320,6 +322,10 @@ pub struct AcpLimits {
 pub struct SqliteLimits {
     /// Maximum materialized bytes returned by one SQLite statement.
     pub max_result_bytes: usize,
+    /// Maximum actor UDS SQLite requests admitted concurrently per VM.
+    pub max_in_flight_requests: usize,
+    /// Maximum estimated request payload bytes queued for actor UDS writes per VM.
+    pub max_queued_request_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -479,6 +485,8 @@ impl Default for SqliteLimits {
     fn default() -> Self {
         Self {
             max_result_bytes: DEFAULT_SQLITE_MAX_RESULT_BYTES,
+            max_in_flight_requests: DEFAULT_SQLITE_MAX_IN_FLIGHT_REQUESTS,
+            max_queued_request_bytes: DEFAULT_SQLITE_MAX_QUEUED_REQUEST_BYTES,
         }
     }
 }
@@ -722,6 +730,16 @@ pub fn vm_limits_from_config(
             &mut limits.sqlite.max_result_bytes,
             sqlite.max_result_bytes,
             "limits.sqlite.maxResultBytes",
+        )?;
+        set_usize(
+            &mut limits.sqlite.max_in_flight_requests,
+            sqlite.max_in_flight_requests,
+            "limits.sqlite.maxInFlightRequests",
+        )?;
+        set_usize(
+            &mut limits.sqlite.max_queued_request_bytes,
+            sqlite.max_queued_request_bytes,
+            "limits.sqlite.maxQueuedRequestBytes",
         )?;
     }
     if let Some(js_runtime) = config.js_runtime.as_ref() {
@@ -1598,7 +1616,7 @@ pub fn validate_vm_limits(
         )));
     }
 
-    let nonzero_usize: [(&str, usize); 36] = [
+    let nonzero_usize: [(&str, usize); 38] = [
         (
             "limits.bindings.max_registered_collections",
             limits.bindings.max_registered_collections,
@@ -1692,6 +1710,14 @@ pub fn validate_vm_limits(
         (
             "limits.sqlite.max_result_bytes",
             limits.sqlite.max_result_bytes,
+        ),
+        (
+            "limits.sqlite.max_in_flight_requests",
+            limits.sqlite.max_in_flight_requests,
+        ),
+        (
+            "limits.sqlite.max_queued_request_bytes",
+            limits.sqlite.max_queued_request_bytes,
         ),
         (
             "limits.js_runtime.captured_output_limit_bytes",
@@ -2001,6 +2027,11 @@ mod tests {
                 max_permission_outcomes_per_vm: Some(45),
                 ..AcpLimitsConfig::default()
             }),
+            sqlite: Some(SqliteLimitsConfig {
+                max_result_bytes: Some(4 * 1024 * 1024),
+                max_in_flight_requests: Some(7),
+                max_queued_request_bytes: Some(2 * 1024 * 1024),
+            }),
             ..VmLimitsConfig::default()
         };
 
@@ -2022,6 +2053,9 @@ mod tests {
         assert_eq!(limits.acp.max_pending_permissions_per_vm, 23);
         assert_eq!(limits.acp.max_permission_outcomes_per_session, 34);
         assert_eq!(limits.acp.max_permission_outcomes_per_vm, 45);
+        assert_eq!(limits.sqlite.max_result_bytes, 4 * 1024 * 1024);
+        assert_eq!(limits.sqlite.max_in_flight_requests, 7);
+        assert_eq!(limits.sqlite.max_queued_request_bytes, 2 * 1024 * 1024);
     }
 
     #[test]

@@ -1,17 +1,17 @@
 //! VM-scoped SQLite substrate shared by VFS and AgentOS durable state.
 //!
-//! The actor backend is intentionally a thin translation over `ActorUdsClient`.
-//! Rivet owns transaction isolation through lease keys, so every transaction
-//! uses one fresh UUID and attaches it to `BEGIN`, every statement, and the
-//! terminal `COMMIT` or `ROLLBACK`. No second mux, pool, or retry scheduler is
-//! needed in the sidecar.
+//! The actor backend multiplexes requests over one `ActorUdsClient` connection.
+//! Rivet owns transaction isolation through lease keys, so a transaction-bound
+//! handle pins `BEGIN`, every statement, and `COMMIT` or `ROLLBACK` to one
+//! connection generation while unrelated requests can remain in flight.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agentos_actor_uds_client::{ActorUdsClient, ActorUdsError};
+use agentos_actor_uds_client::{ActorUdsClient, ActorUdsClientConfig, ActorUdsError};
 pub use agentos_actor_uds_client::{QueryResult, SqlValue};
+use agentos_native_sidecar_core::limits::SqliteLimits;
 use async_trait::async_trait;
 use rusqlite::types::{Value, ValueRef};
 use thiserror::Error;
@@ -111,29 +111,38 @@ pub type SharedVmSqliteDatabase = Arc<dyn VmSqliteDatabase>;
 pub async fn resolve_vm_sqlite(
     descriptor: &VmSqliteDescriptor,
     runtime: agentos_runtime::RuntimeContext,
-    max_result_bytes: usize,
+    limits: SqliteLimits,
 ) -> Result<SharedVmSqliteDatabase, VmSqliteError> {
     match descriptor {
         VmSqliteDescriptor::ActorUds { path } => Ok(Arc::new(
-            ActorUdsVmSqliteDatabase::open(path.clone(), max_result_bytes).await?,
+            ActorUdsVmSqliteDatabase::open(path.clone(), runtime, limits).await?,
         )),
         VmSqliteDescriptor::SqliteFile { path } => Ok(Arc::new(
-            LocalVmSqliteDatabase::open(PathBuf::from(path), runtime, max_result_bytes).await?,
+            LocalVmSqliteDatabase::open(PathBuf::from(path), runtime, limits.max_result_bytes)
+                .await?,
         )),
     }
 }
 
-#[derive(Clone)]
 struct ActorUdsVmSqliteDatabase {
     client: ActorUdsClient,
     max_result_bytes: usize,
 }
 
 impl ActorUdsVmSqliteDatabase {
-    async fn open(path: String, max_result_bytes: usize) -> Result<Self, VmSqliteError> {
+    async fn open(
+        path: String,
+        runtime: agentos_runtime::RuntimeContext,
+        limits: SqliteLimits,
+    ) -> Result<Self, VmSqliteError> {
+        let config = ActorUdsClientConfig {
+            max_in_flight_requests: limits.max_in_flight_requests,
+            max_queued_request_bytes: limits.max_queued_request_bytes,
+            ..ActorUdsClientConfig::default()
+        };
         let database = Self {
-            client: ActorUdsClient::new(path),
-            max_result_bytes,
+            client: ActorUdsClient::new(path, runtime, config)?,
+            max_result_bytes: limits.max_result_bytes,
         };
         database.enable_and_verify_foreign_keys().await?;
         Ok(database)
@@ -161,18 +170,17 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
         statements: Vec<SqlStatement>,
     ) -> Result<Vec<QueryResult>, VmSqliteError> {
         let key = Uuid::new_v4().to_string();
-        self.client.begin(&key, None).await?;
+        let mut transaction = self
+            .client
+            .begin(&key, Some(self.client.request_timeout_ms()))
+            .await?;
         let mut results = Vec::with_capacity(statements.len());
         for statement in statements {
             let expected_changes = statement.expected_changes;
-            match self
-                .client
-                .query_with_lease(statement.sql, statement.params, Some(&key))
-                .await
-            {
+            match transaction.query(statement.sql, statement.params).await {
                 Ok(result) => {
                     if let Err(error) = validate_expected_changes(expected_changes, &result) {
-                        if let Err(rollback_error) = self.client.rollback(&key).await {
+                        if let Err(rollback_error) = transaction.rollback().await {
                             eprintln!(
                                 "ERR_AGENTOS_SQLITE_ROLLBACK: actor transaction {key} rollback failed after {error}: {rollback_error}"
                             );
@@ -180,7 +188,7 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
                         return Err(error);
                     }
                     if let Err(error) = validate_result_size(&result, self.max_result_bytes) {
-                        if let Err(rollback_error) = self.client.rollback(&key).await {
+                        if let Err(rollback_error) = transaction.rollback().await {
                             eprintln!(
                                 "ERR_AGENTOS_SQLITE_ROLLBACK: actor transaction {key} rollback failed after {error}: {rollback_error}"
                             );
@@ -190,7 +198,7 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
                     results.push(result)
                 }
                 Err(error) => {
-                    if let Err(rollback_error) = self.client.rollback(&key).await {
+                    if let Err(rollback_error) = transaction.rollback().await {
                         eprintln!(
                             "ERR_AGENTOS_SQLITE_ROLLBACK: actor transaction {key} rollback failed after {error}: {rollback_error}"
                         );
@@ -199,8 +207,8 @@ impl VmSqliteDatabase for ActorUdsVmSqliteDatabase {
                 }
             }
         }
-        if let Err(error) = self.client.commit(&key).await {
-            if let Err(rollback_error) = self.client.rollback(&key).await {
+        if let Err(error) = transaction.commit().await {
+            if let Err(rollback_error) = transaction.rollback().await {
                 eprintln!(
                     "ERR_AGENTOS_SQLITE_ROLLBACK: actor transaction {key} rollback failed after commit error {error}: {rollback_error}"
                 );
@@ -594,7 +602,7 @@ mod tests {
                     path: dir.path().join("state.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar_core::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -660,7 +668,7 @@ mod tests {
                     path: dir.path().join("owner-versions.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar_core::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -780,7 +788,7 @@ mod tests {
                     path: dir.path().join("invalid-versions.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar_core::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -868,7 +876,7 @@ mod tests {
                     path: dir.path().join("atomic-migration.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar_core::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -908,7 +916,10 @@ mod tests {
                     path: dir.path().join("result-limit.sqlite").display().to_string(),
                 },
                 context,
-                32,
+                SqliteLimits {
+                    max_result_bytes: 32,
+                    ..SqliteLimits::default()
+                },
             )
             .await
             .expect("database");

@@ -7,11 +7,12 @@ repository.workspace = true
 description = "Internal AgentOS client for Rivet actor SQLite over Unix sockets"
 
 [dependencies]
+agentos-runtime = { workspace = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_bare = "0.5"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "net", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
 vbare.workspace = true
 
 [build-dependencies]

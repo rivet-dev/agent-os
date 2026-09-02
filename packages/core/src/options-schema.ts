@@ -187,7 +187,11 @@ export const agentOsLimitsSchema = z
 			.strict()
 			.optional(),
 		sqlite: z
-			.object({ maxResultBytes: positiveInteger.optional() })
+			.object({
+				maxResultBytes: positiveInteger.optional(),
+				maxInFlightRequests: positiveInteger.optional(),
+				maxQueuedRequestBytes: positiveInteger.optional(),
+			})
 			.strict()
 			.optional(),
 		jsRuntime: z

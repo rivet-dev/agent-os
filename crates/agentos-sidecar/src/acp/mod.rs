@@ -2248,7 +2248,7 @@ mod tests {
     }
 
     async fn durable_test_store() -> (tempfile::TempDir, SessionStore) {
-        use agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES;
+        use agentos_native_sidecar::limits::SqliteLimits;
         use agentos_vm_config::VmSqliteDescriptor;
 
         let dir = tempfile::tempdir().expect("durable ACP test directory");
@@ -2259,7 +2259,7 @@ mod tests {
             agentos_runtime::SidecarRuntime::process(&agentos_runtime::RuntimeConfig::default())
                 .expect("sidecar runtime")
                 .context(),
-            DEFAULT_SQLITE_MAX_RESULT_BYTES,
+            SqliteLimits::default(),
         )
         .await
         .expect("local durable ACP database");

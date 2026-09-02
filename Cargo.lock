@@ -68,6 +68,7 @@ dependencies = [
 name = "agentos-actor-uds-client"
 version = "0.0.1"
 dependencies = [
+ "agentos-runtime",
  "anyhow",
  "rivet-vbare-compiler",
  "serde",

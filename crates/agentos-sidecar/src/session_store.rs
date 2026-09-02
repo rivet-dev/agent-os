@@ -2339,7 +2339,7 @@ mod tests {
             let database = resolve_vm_sqlite(
                 &descriptor,
                 context.clone(),
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -2422,7 +2422,7 @@ mod tests {
             let database = resolve_vm_sqlite(
                 &descriptor,
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("reopen database");
@@ -2466,7 +2466,7 @@ mod tests {
             let database = resolve_vm_sqlite(
                 &descriptor,
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -2560,7 +2560,7 @@ mod tests {
                     path: dir.path().join("retention.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -2719,7 +2719,7 @@ mod tests {
                         .to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -2796,7 +2796,7 @@ mod tests {
                     path: dir.path().join("reconcile.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -2931,7 +2931,7 @@ mod tests {
                     path: dir.path().join("permission-race.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3009,7 +3009,7 @@ mod tests {
                         .to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3094,7 +3094,7 @@ mod tests {
                     path: dir.path().join("permission-lifecycle.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3146,7 +3146,7 @@ mod tests {
                         .to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3203,7 +3203,7 @@ mod tests {
                     path: dir.path().join("tombstones.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3238,7 +3238,7 @@ mod tests {
                     path: dir.path().join("schema.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3319,7 +3319,7 @@ mod tests {
                     path: dir.path().join("state.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3461,7 +3461,7 @@ mod tests {
             let database = resolve_vm_sqlite(
                 &descriptor,
                 context.clone(),
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3498,7 +3498,7 @@ mod tests {
             let database = resolve_vm_sqlite(
                 &descriptor,
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("reopen database");
@@ -3529,7 +3529,7 @@ mod tests {
                         .to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3619,7 +3619,7 @@ mod tests {
                     path: dir.path().join("bounds.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3668,7 +3668,7 @@ mod tests {
                     path: dir.path().join("concurrent-bounds.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");
@@ -3787,7 +3787,7 @@ mod tests {
                     path: dir.path().join("counter-reconcile.sqlite").display().to_string(),
                 },
                 context,
-                agentos_native_sidecar::limits::DEFAULT_SQLITE_MAX_RESULT_BYTES,
+                agentos_native_sidecar::limits::SqliteLimits::default(),
             )
             .await
             .expect("database");

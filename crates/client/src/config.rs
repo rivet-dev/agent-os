@@ -594,6 +594,18 @@ pub struct SqliteLimits {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_result_bytes: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxInFlightRequests",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_in_flight_requests: Option<u64>,
+    #[serde(
+        default,
+        rename = "maxQueuedRequestBytes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_queued_request_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
