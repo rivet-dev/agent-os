@@ -692,9 +692,12 @@ fn javascript_module_execution_accepts_inline_exports_in_a_context() {
             wire_vm(&connection_id, &session_id, &vm_id),
             wire::RequestPayload::JavaScriptExecutionRequest(wire::JavaScriptExecutionRequest {
                 process: context_process_options("module-context"),
-                source: String::from("export const y = 1;"),
+                source: String::from(
+                    "globalThis.moduleRuns = (globalThis.moduleRuns ?? 0) + 1;\n\
+                     export const y = globalThis.moduleRuns;",
+                ),
                 format: Some(wire::JavaScriptModuleFormat::Module),
-                file_path: None,
+                file_path: Some(String::from("/workspace/reused-inline.mjs")),
                 inputs: None,
             }),
         ))
@@ -709,6 +712,56 @@ fn javascript_module_execution_accepts_inline_exports_in_a_context() {
     );
     assert_eq!(result.outcome, wire::ExecutionOutcome::Succeeded);
     assert_eq!(result.exit_code, Some(0));
+
+    let repeated = sidecar
+        .dispatch_wire_blocking(wire_request(
+            5,
+            wire_vm(&connection_id, &session_id, &vm_id),
+            wire::RequestPayload::JavaScriptExecutionRequest(wire::JavaScriptExecutionRequest {
+                process: context_process_options("module-context"),
+                source: String::from(
+                    "globalThis.moduleRuns = (globalThis.moduleRuns ?? 0) + 1;\n\
+                     export const y = globalThis.moduleRuns;",
+                ),
+                format: Some(wire::JavaScriptModuleFormat::Module),
+                file_path: Some(String::from("/workspace/reused-inline.mjs")),
+                inputs: None,
+            }),
+        ))
+        .expect("repeat inline ES module with the same identity");
+    assert_eq!(accepted_execution_id(repeated), execution_id);
+    let repeated_result = wait_for_execution(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        &execution_id,
+    );
+    assert_eq!(repeated_result.outcome, wire::ExecutionOutcome::Succeeded);
+
+    let evaluation = sidecar
+        .dispatch_wire_blocking(wire_request(
+            6,
+            wire_vm(&connection_id, &session_id, &vm_id),
+            wire::RequestPayload::JavaScriptEvaluationRequest(wire::JavaScriptEvaluationRequest {
+                process: context_process_options("module-context"),
+                expression: String::from("globalThis.moduleRuns"),
+                format: Some(wire::JavaScriptModuleFormat::Module),
+                file_path: None,
+                inputs: None,
+            }),
+        ))
+        .expect("read repeated module execution count");
+    assert_eq!(accepted_execution_id(evaluation), execution_id);
+    let evaluation_result = wait_for_execution(
+        &mut sidecar,
+        &connection_id,
+        &session_id,
+        &vm_id,
+        &execution_id,
+    );
+    assert_eq!(evaluation_result.outcome, wire::ExecutionOutcome::Succeeded);
+    assert_eq!(evaluation_result.evaluation_value.as_deref(), Some("2"));
 
     reset_execution(
         &mut sidecar,
