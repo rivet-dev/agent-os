@@ -486,3 +486,16 @@ jobs:
           pnpm --filter=publish exec tsx src/ci/bin.ts publish-crates \
             --version ${{ needs.context.outputs.version }} \
             --allow-dirty
+
+  notify-managed-services:
+    name: Notify managed services
+    needs: [context, publish-npm, release-assets, publish-crates]
+    if: ${{ success() && needs.context.outputs.trigger == 'release' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: rivet-dev/rivet/.github/actions/managed-services-dispatch@main
+        with:
+          product: agentos
+          version: ${{ needs.context.outputs.version }}
+          sha: ${{ github.sha }}
+          token: ${{ secrets.MANAGED_SERVICES_DISPATCH_TOKEN }}
