@@ -10476,10 +10476,10 @@ console.log(JSON.stringify({ status: "ok", summary }));
             let denied = bridge.require_resolved_network_access(
                 "vm-resolved",
                 NetworkOperation::Http,
-                "allowed.test:443",
+                "tcp://allowed.test:443",
                 &[
-                    String::from("198.51.100.7:443"),
-                    String::from("203.0.113.9:443"),
+                    String::from("tcp://198.51.100.7:443"),
+                    String::from("tcp://203.0.113.9:443"),
                 ],
             );
             assert!(denied
@@ -10497,8 +10497,8 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 .require_resolved_network_access(
                     "vm-resolved",
                     NetworkOperation::Http,
-                    "allowed.test:443",
-                    &[String::from("198.51.100.7:443")],
+                    "tcp://allowed.test:443",
+                    &[String::from("tcp://198.51.100.7:443")],
                 )
                 .expect("hostname allow remains sufficient without an applicable address rule");
 
@@ -10512,8 +10512,8 @@ console.log(JSON.stringify({ status: "ok", summary }));
                 .require_resolved_network_access(
                     "vm-resolved",
                     NetworkOperation::Http,
-                    "198.51.100.7:443",
-                    &[String::from("198.51.100.7:443")],
+                    "tcp://198.51.100.7:443",
+                    &[String::from("tcp://198.51.100.7:443")],
                 )
                 .expect("literal IP authority keeps ordinary IP-only semantics");
             assert!(
@@ -10521,8 +10521,8 @@ console.log(JSON.stringify({ status: "ok", summary }));
                     .require_resolved_network_access(
                         "vm-resolved",
                         NetworkOperation::Http,
-                        "allowed.test:443",
-                        &[String::from("198.51.100.7:443")],
+                        "tcp://allowed.test:443",
+                        &[String::from("tcp://198.51.100.7:443")],
                     )
                     .is_err(),
                 "an IP allow must not implicitly authorize a hostname"
