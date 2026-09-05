@@ -2769,6 +2769,21 @@ where
                     })
                     .unwrap_or(false);
                 if parent_is_pull_driven_wasm {
+                    // Preserve child_process.poll as the only stream and exit
+                    // delivery path, while allowing a terminal child event to
+                    // release its kernel-owned descriptors before the parent
+                    // reaches waitpid.
+                    self.poll_descendant_javascript_child_process_nowait(
+                        vm_id,
+                        process_id,
+                        &parent_path,
+                        &child_process_id,
+                        true,
+                        javascript_services,
+                        python_services,
+                        python_socket_completions,
+                        None,
+                    )?;
                     continue;
                 }
                 self.expire_child_process_sync_if_needed(
@@ -8613,14 +8628,7 @@ where
                 drop(reservation);
                 continue;
             }
-            if preserve_pull_owned_events
-                && matches!(
-                    &event,
-                    ActiveExecutionEvent::Stdout(_)
-                        | ActiveExecutionEvent::Stderr(_)
-                        | ActiveExecutionEvent::Exited(_)
-                )
-            {
+            if preserve_pull_owned_events {
                 let Some(mut vm) = self.vms.get_mut(vm_id) else {
                     return Ok(Value::Null);
                 };
@@ -8632,6 +8640,9 @@ where
                 let Some(child) = parent.child_processes.get_mut(child_process_id) else {
                     return Ok(Value::Null);
                 };
+                if let ActiveExecutionEvent::Exited(exit_code) = &event {
+                    child.kernel_handle.finish(*exit_code);
+                }
                 child.queue_pending_polled_execution_event(PolledExecutionEvent {
                     event,
                     reservation,
@@ -10277,6 +10288,85 @@ mod child_event_claim_tests {
             GuestRuntimeKind::JavaScript,
             ActiveExecution::Binding(BindingExecution::default()),
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wasm_child_exit_closes_kernel_writer_before_parent_poll() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut sidecar, vm_id) =
+                    sidecar_with_test_vm(agentos_runtime::DEFAULT_PROTOCOL_MAX_PROCESS_EVENTS)
+                        .await;
+                let root_id = String::from("wasm-pipe-root");
+                let child_id = String::from("wasm-pipe-child");
+                let (root_pid, read_fd) = {
+                    let mut vm = sidecar.vms.get_mut(&vm_id).expect("WASM pipe VM");
+                    let mut root = binding_process(&mut vm, "WASM pipe root", None);
+                    root.runtime = GuestRuntimeKind::WebAssembly;
+                    let root_pid = root.kernel_pid;
+                    let (read_fd, write_fd) = vm
+                        .kernel
+                        .open_pipe(EXECUTION_DRIVER_NAME, root_pid)
+                        .expect("open parent pipe");
+                    let mut child =
+                        binding_process(&mut vm, "WASM pipe child", Some(root.kernel_pid));
+                    child.runtime = GuestRuntimeKind::WebAssembly;
+                    let writer = vm
+                        .kernel
+                        .fd_transfer(EXECUTION_DRIVER_NAME, root_pid, write_fd)
+                        .expect("transfer pipe writer to child");
+                    vm.kernel
+                        .fd_install_transfer_at(
+                            EXECUTION_DRIVER_NAME,
+                            child.kernel_pid,
+                            write_fd,
+                            0,
+                            &writer,
+                        )
+                        .expect("install child pipe writer");
+                    vm.kernel
+                        .fd_close(EXECUTION_DRIVER_NAME, root_pid, write_fd)
+                        .expect("close parent pipe writer");
+                    child
+                        .queue_pending_execution_event(ActiveExecutionEvent::Exited(0))
+                        .expect("queue child exit");
+                    root.child_processes.insert(child_id.clone(), child);
+                    vm.active_processes.insert(root_id.clone(), root);
+                    (root_pid, read_fd)
+                };
+
+                assert!(
+                    !sidecar
+                        .pump_child_process_events(&vm_id)
+                        .await
+                        .expect("pump WASM child exit"),
+                    "the proactive pump must leave WASM child delivery pull-owned"
+                );
+                let mut vm = sidecar.vms.get_mut(&vm_id).expect("WASM pipe VM");
+                assert_eq!(
+                    vm.kernel
+                        .fd_read_with_timeout_result(
+                            EXECUTION_DRIVER_NAME,
+                            root_pid,
+                            read_fd,
+                            1,
+                            Some(Duration::ZERO),
+                        )
+                        .expect("read after child exit"),
+                    None,
+                    "the child exit must close the final pipe writer before child_process.poll"
+                );
+                let child = vm
+                    .active_processes
+                    .get(&root_id)
+                    .and_then(|root| root.child_processes.get(&child_id))
+                    .expect("child remains available to child_process.poll");
+                assert!(matches!(
+                    child.pending_execution_events.front(),
+                    Some(ActiveExecutionEvent::Exited(0))
+                ));
+            })
+            .await;
     }
 
     fn rpc(id: u64) -> ActiveExecutionEvent {
