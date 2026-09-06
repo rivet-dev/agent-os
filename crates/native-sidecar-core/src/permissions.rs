@@ -68,26 +68,31 @@ pub fn evaluate_permissions_policy(
         ),
         "network" => evaluate_pattern_permission_scope(
             permissions.network.as_ref(),
+            domain,
             capability_operation(capability, domain),
             resource,
         ),
         "child_process" => evaluate_pattern_permission_scope(
             permissions.child_process.as_ref(),
+            domain,
             capability_operation(capability, domain),
             resource,
         ),
         "process" => evaluate_pattern_permission_scope(
             permissions.process.as_ref(),
+            domain,
             capability_operation(capability, domain),
             resource,
         ),
         "env" => evaluate_pattern_permission_scope(
             permissions.env.as_ref(),
+            domain,
             capability_operation(capability, domain),
             resource,
         ),
         "binding" => evaluate_pattern_permission_scope(
             permissions.binding.as_ref(),
+            domain,
             capability_operation(capability, domain),
             resource,
         ),
@@ -121,7 +126,7 @@ pub fn evaluate_matching_pattern_permission_policy(
         vm_config::PatternPermissionScope::Rules(rules) => rules
             .rules
             .iter()
-            .filter(|rule| pattern_rule_matches(rule, operation, resource))
+            .filter(|rule| pattern_rule_matches(rule, domain, operation, resource))
             .map(|rule| rule.mode)
             .next_back(),
     }
@@ -149,6 +154,7 @@ fn evaluate_fs_permission_scope(
 
 fn evaluate_pattern_permission_scope(
     scope: Option<&vm_config::PatternPermissionScope>,
+    domain: &str,
     operation: &str,
     resource: Option<&str>,
 ) -> vm_config::PermissionMode {
@@ -157,7 +163,7 @@ fn evaluate_pattern_permission_scope(
         Some(vm_config::PatternPermissionScope::Rules(rules)) => {
             let mut mode = rules.default.unwrap_or(vm_config::PermissionMode::Deny);
             for rule in &rules.rules {
-                if pattern_rule_matches(rule, operation, resource) {
+                if pattern_rule_matches(rule, domain, operation, resource) {
                     mode = rule.mode;
                 }
             }
@@ -179,11 +185,15 @@ fn fs_rule_matches(
 
 fn pattern_rule_matches(
     rule: &vm_config::PatternPermissionRule,
+    domain: &str,
     operation: &str,
     resource: Option<&str>,
 ) -> bool {
     let operations_match = permission_operation_matches(&rule.operations, operation);
-    let patterns_match = permission_resource_matches(&rule.patterns, resource);
+    let patterns_match = match domain {
+        "network" => network_resource_matches(&rule.patterns, resource),
+        _ => permission_resource_matches(&rule.patterns, resource),
+    };
     operations_match && patterns_match
 }
 
@@ -199,6 +209,96 @@ fn permission_resource_matches(patterns: &[String], resource: Option<&str>) -> b
             .iter()
             .any(|pattern| permission_glob_matches(pattern, value))
     })
+}
+
+/// Match `network` rule patterns against a kernel network resource.
+///
+/// The kernel formats network resources as URIs before the policy check
+/// (`tcp://host:port` from `format_tcp_resource`, `dns://host` from
+/// `format_dns_resource`). Operators write rules in the documented host form
+/// (`api.example.com`, `api.example.com:443`, `*.example.com`, `*`), which can
+/// never equal a URI and whose single `*` cannot cross the `//`. Without this
+/// translation an allowlist denies every host and a blocklist permits every
+/// host.
+///
+/// A pattern that carries a resource scheme keeps matching the full URI. A
+/// scheme-less pattern is matched against the URI's host subject: the bare
+/// host and, when the resource carries a port, `host:port`. Hosts are
+/// case-insensitive, and the kernel lowercases `dns://` resources but not
+/// `tcp://` ones, so both sides are lowercased before globbing; otherwise a
+/// rule could apply to the DNS half of a connection and miss the TCP half.
+///
+/// Only `tcp://`, `udp://`, and `dns://` resources have a host subject. Unix
+/// socket resources (`unix:/path`, `unix:abstract:<hex>`, `unix://path`) are
+/// matched by `unix:` patterns only, and any other resource shape is matched
+/// by nothing but a full-URI pattern, so the unexpected fails closed.
+fn network_resource_matches(patterns: &[String], resource: Option<&str>) -> bool {
+    let Some(resource) = resource else {
+        return false;
+    };
+    let subject = network_resource_subject(resource);
+    patterns.iter().any(|pattern| {
+        if network_pattern_has_scheme(pattern) {
+            return permission_glob_matches(pattern, resource);
+        }
+        let Some(subject) = &subject else {
+            return false;
+        };
+        let pattern = pattern.to_ascii_lowercase();
+        permission_glob_matches(&pattern, &subject.host)
+            || subject
+                .host_port
+                .as_deref()
+                .is_some_and(|host_port| permission_glob_matches(&pattern, host_port))
+    })
+}
+
+/// Lowercased host subject of a network resource URI: the host alone and,
+/// when present, the `host:port` form.
+struct NetworkResourceSubject {
+    host: String,
+    host_port: Option<String>,
+}
+
+/// Resource schemes the kernel and sidecar emit for `network` checks. A
+/// pattern starting with one of these is a full-URI pattern.
+const NETWORK_RESOURCE_SCHEMES: [&str; 4] = ["tcp:", "udp:", "dns:", "unix:"];
+
+fn network_pattern_has_scheme(pattern: &str) -> bool {
+    NETWORK_RESOURCE_SCHEMES
+        .iter()
+        .any(|scheme| pattern.starts_with(scheme))
+}
+
+fn network_resource_subject(resource: &str) -> Option<NetworkResourceSubject> {
+    let rest = ["tcp://", "udp://", "dns://"]
+        .iter()
+        .find_map(|scheme| resource.strip_prefix(scheme))?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    let rest = rest.to_ascii_lowercase();
+    // `host:port` when the suffix after the last `:` is a port number, or the
+    // `*` wildcard that listener-inspection resources use for "any port". The
+    // host is kept as the kernel formatted it, so an IPv6 literal such as
+    // `tcp://::1:443` yields the host `::1`, which is also the pattern form an
+    // operator writes for it.
+    match rest.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty()
+                && !port.is_empty()
+                && (port == "*" || port.bytes().all(|b| b.is_ascii_digit())) =>
+        {
+            Some(NetworkResourceSubject {
+                host: host.to_owned(),
+                host_port: Some(rest.clone()),
+            })
+        }
+        _ => Some(NetworkResourceSubject {
+            host: rest.clone(),
+            host_port: None,
+        }),
+    }
 }
 
 pub fn validate_permissions_policy(
@@ -480,7 +580,7 @@ mod tests {
                 &policy,
                 "network",
                 "network.http",
-                Some("198.51.100.7:443"),
+                Some("tcp://198.51.100.7:443"),
             ),
             None,
         );
@@ -489,7 +589,7 @@ mod tests {
                 &policy,
                 "network",
                 "network.http",
-                Some("203.0.113.9:443"),
+                Some("tcp://203.0.113.9:443"),
             ),
             Some(vm_config::PermissionMode::Allow),
         );
