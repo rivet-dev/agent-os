@@ -221,11 +221,17 @@ fn permission_resource_matches(patterns: &[String], resource: Option<&str>) -> b
 /// translation an allowlist denies every host and a blocklist permits every
 /// host.
 ///
-/// A pattern that carries its own scheme keeps matching the full URI. A
+/// A pattern that carries a resource scheme keeps matching the full URI. A
 /// scheme-less pattern is matched against the URI's host subject: the bare
-/// host and, when the resource carries a port, `host:port`. A resource that
-/// does not parse as `scheme://subject` is only ever matched by full-URI
-/// patterns, so unexpected resource shapes fail closed.
+/// host and, when the resource carries a port, `host:port`. Hosts are
+/// case-insensitive, and the kernel lowercases `dns://` resources but not
+/// `tcp://` ones, so both sides are lowercased before globbing; otherwise a
+/// rule could apply to the DNS half of a connection and miss the TCP half.
+///
+/// Only `tcp://`, `udp://`, and `dns://` resources have a host subject. Unix
+/// socket resources (`unix:/path`, `unix:abstract:<hex>`, `unix://path`) are
+/// matched by `unix:` patterns only, and any other resource shape is matched
+/// by nothing but a full-URI pattern, so the unexpected fails closed.
 fn network_resource_matches(patterns: &[String], resource: Option<&str>) -> bool {
     let Some(resource) = resource else {
         return false;
@@ -238,50 +244,58 @@ fn network_resource_matches(patterns: &[String], resource: Option<&str>) -> bool
         let Some(subject) = &subject else {
             return false;
         };
-        permission_glob_matches(pattern, subject.host)
+        let pattern = pattern.to_ascii_lowercase();
+        permission_glob_matches(&pattern, &subject.host)
             || subject
                 .host_port
-                .is_some_and(|host_port| permission_glob_matches(pattern, host_port))
+                .as_deref()
+                .is_some_and(|host_port| permission_glob_matches(&pattern, host_port))
     })
 }
 
-/// Host subject of a network resource URI: the host alone and, when present,
-/// the original `host:port` suffix.
-struct NetworkResourceSubject<'a> {
-    host: &'a str,
-    host_port: Option<&'a str>,
+/// Lowercased host subject of a network resource URI: the host alone and,
+/// when present, the `host:port` form.
+struct NetworkResourceSubject {
+    host: String,
+    host_port: Option<String>,
 }
+
+/// Resource schemes the kernel and sidecar emit for `network` checks. A
+/// pattern starting with one of these is a full-URI pattern.
+const NETWORK_RESOURCE_SCHEMES: [&str; 4] = ["tcp:", "udp:", "dns:", "unix:"];
 
 fn network_pattern_has_scheme(pattern: &str) -> bool {
-    pattern.contains("://") || pattern.starts_with("unix:")
+    NETWORK_RESOURCE_SCHEMES
+        .iter()
+        .any(|scheme| pattern.starts_with(scheme))
 }
 
-fn network_resource_subject(resource: &str) -> Option<NetworkResourceSubject<'_>> {
-    let (scheme, rest) = resource.split_once("://")?;
-    if scheme.is_empty()
-        || !scheme
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'-')
-        || rest.is_empty()
-        || rest.contains('/')
-    {
+fn network_resource_subject(resource: &str) -> Option<NetworkResourceSubject> {
+    let rest = ["tcp://", "udp://", "dns://"]
+        .iter()
+        .find_map(|scheme| resource.strip_prefix(scheme))?;
+    if rest.is_empty() || rest.contains('/') {
         return None;
     }
-    // `host:port` when the suffix after the last `:` is a port number. The host
-    // is kept exactly as the kernel formatted it, so an IPv6 literal such as
+    let rest = rest.to_ascii_lowercase();
+    // `host:port` when the suffix after the last `:` is a port number, or the
+    // `*` wildcard that listener-inspection resources use for "any port". The
+    // host is kept as the kernel formatted it, so an IPv6 literal such as
     // `tcp://::1:443` yields the host `::1`, which is also the pattern form an
     // operator writes for it.
     match rest.rsplit_once(':') {
         Some((host, port))
-            if !host.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+            if !host.is_empty()
+                && !port.is_empty()
+                && (port == "*" || port.bytes().all(|b| b.is_ascii_digit())) =>
         {
             Some(NetworkResourceSubject {
-                host,
-                host_port: Some(rest),
+                host: host.to_owned(),
+                host_port: Some(rest.clone()),
             })
         }
         _ => Some(NetworkResourceSubject {
-            host: rest,
+            host: rest.clone(),
             host_port: None,
         }),
     }

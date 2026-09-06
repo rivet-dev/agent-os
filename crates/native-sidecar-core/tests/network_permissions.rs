@@ -305,3 +305,119 @@ fn child_process_patterns_are_not_subject_parsed() {
         PermissionMode::Deny
     );
 }
+
+// --- Host matching is case-insensitive on both sides ---------------------------
+//
+// DNS resources are lowercased by the kernel before the check while TCP
+// resources keep the caller's spelling, so a case-sensitive host comparison
+// would let one rule apply to the `dns://` half of a connection and miss the
+// `tcp://` half.
+
+#[test]
+fn host_pattern_case_does_not_matter() {
+    let policy = network_policy(
+        PermissionMode::Deny,
+        vec![(PermissionMode::Allow, "Api.Example.COM")],
+    );
+    assert_eq!(
+        http(&policy, "tcp://api.example.com:443"),
+        PermissionMode::Allow
+    );
+    assert_eq!(dns(&policy, "dns://api.example.com"), PermissionMode::Allow);
+}
+
+#[test]
+fn resource_host_case_does_not_matter() {
+    let policy = network_policy(
+        PermissionMode::Deny,
+        vec![(PermissionMode::Allow, "api.example.com:443")],
+    );
+    assert_eq!(
+        http(&policy, "tcp://API.Example.com:443"),
+        PermissionMode::Allow
+    );
+}
+
+#[test]
+fn deny_rule_blocks_both_halves_of_a_mixed_case_connection() {
+    let policy = network_policy(
+        PermissionMode::Allow,
+        vec![(PermissionMode::Deny, "API.example.com")],
+    );
+    assert_eq!(dns(&policy, "dns://api.example.com"), PermissionMode::Deny);
+    assert_eq!(
+        http(&policy, "tcp://API.example.com:443"),
+        PermissionMode::Deny
+    );
+}
+
+// --- Listener inspection resources use a wildcard port ------------------------
+
+#[test]
+fn wildcard_port_inspection_resource_exposes_the_host_subject() {
+    let policy = network_policy(
+        PermissionMode::Deny,
+        vec![(PermissionMode::Allow, "127.0.0.1")],
+    );
+    let listen = |resource: &str| {
+        evaluate_permissions_policy(&policy, "network", "network.listen", Some(resource))
+    };
+    assert_eq!(listen("tcp://127.0.0.1:*"), PermissionMode::Allow);
+    assert_eq!(listen("udp://127.0.0.1:*"), PermissionMode::Allow);
+    assert_eq!(listen("tcp://10.0.0.5:*"), PermissionMode::Deny);
+}
+
+#[test]
+fn host_port_pattern_does_not_match_a_wildcard_port_resource() {
+    let policy = network_policy(
+        PermissionMode::Deny,
+        vec![(PermissionMode::Allow, "127.0.0.1:8080")],
+    );
+    assert_eq!(
+        evaluate_permissions_policy(
+            &policy,
+            "network",
+            "network.listen",
+            Some("tcp://127.0.0.1:*")
+        ),
+        PermissionMode::Deny
+    );
+}
+
+// --- Unix socket resources are not hosts ---------------------------------------
+//
+// Unix sockets are emitted as `unix:/path`, `unix:abstract:<hex>`, or
+// `unix://path` depending on the producer. Host patterns never apply to them;
+// they are matched by `unix:` patterns only.
+
+#[test]
+fn star_host_pattern_does_not_match_unix_socket_resources() {
+    let policy = network_policy(PermissionMode::Deny, vec![(PermissionMode::Allow, "*")]);
+    let listen = |resource: &str| {
+        evaluate_permissions_policy(&policy, "network", "network.listen", Some(resource))
+    };
+    assert_eq!(listen("unix:/tmp/app.sock"), PermissionMode::Deny);
+    assert_eq!(listen("unix://tmp/app.sock"), PermissionMode::Deny);
+    assert_eq!(listen("unix:abstract:6170"), PermissionMode::Deny);
+    assert_eq!(listen("unix:autobind"), PermissionMode::Deny);
+}
+
+#[test]
+fn unix_patterns_match_unix_socket_resources_literally() {
+    let policy = network_policy(
+        PermissionMode::Deny,
+        vec![
+            (PermissionMode::Allow, "unix:/tmp/app.sock"),
+            (PermissionMode::Allow, "unix://tmp/app.sock"),
+            (PermissionMode::Allow, "unix:abstract:*"),
+        ],
+    );
+    let listen = |resource: &str| {
+        evaluate_permissions_policy(&policy, "network", "network.listen", Some(resource))
+    };
+    assert_eq!(listen("unix:/tmp/app.sock"), PermissionMode::Allow);
+    assert_eq!(listen("unix://tmp/app.sock"), PermissionMode::Allow);
+    assert_eq!(listen("unix:abstract:6170"), PermissionMode::Allow);
+    assert_eq!(listen("unix:/tmp/other.sock"), PermissionMode::Deny);
+    assert_eq!(listen("tcp://tmp:80"), PermissionMode::Deny);
+}

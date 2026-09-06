@@ -77,7 +77,7 @@ To invert it, flip `default` to `"deny"` and allow just one subtree:
 
 ## Allow only specific network hosts
 
-Every non-`fs` scope matches by `patterns` instead of `paths`. For `network`, a pattern is a host (or `host:port`), and the operations are `fetch`, `http`, `dns`, and `listen`. Host patterns are globs: `*.example.com` matches every subdomain, `api.example.com:443` matches one port, and `*` matches every host. A pattern may also name the full connection URI, `tcp://<host>:<port>` for `fetch`, `http`, and `listen`, or `dns://<host>` for `dns`, when a rule should apply to one scheme only.
+Every non-`fs` scope matches by `patterns` instead of `paths`. For `network`, a pattern is a host (or `host:port`), and the operations are `fetch`, `http`, `dns`, and `listen`. Host patterns are case-insensitive globs: `*.example.com` matches every subdomain, `api.example.com:443` matches one port, and `*` matches every host. A pattern may also name the full connection URI, `tcp://<host>:<port>` for `fetch`, `http`, and `listen`, or `dns://<host>` for `dns`, when a rule should apply to one scheme only. Unix domain sockets are not hosts: a host pattern never matches them, and they are matched only by `unix:` patterns such as `unix:/tmp/app.sock`.
 
 <CodeSnippet file="examples/permissions/server.ts" region="allow-one-host" />
 
